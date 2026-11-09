@@ -38,15 +38,31 @@ public:
  }
  void clearJoystick(){keyboard.clearJoystick(); _paddleJoystick.setMask(0);}
  void setJoystickMask(uint8_t mask){
+   const TKGameInputProfile joystickProfile=TKJoystickProfile(tape.gameInputProfile());
+   if (joystickProfile==TKGameInputProfile::MissilesDefense && _paddleJoystick.enabled())
+     _missilesAim.advance(cpu.cycles,keyboard.joystickMask());
    if (!_paddleJoystick.enabled()) mask=0;
    keyboard.setGameInputProfile(tape.gameInputProfile());
    keyboard.setJoystickMask(mask);
    _paddleJoystick.setMask(mask);
+   if (joystickProfile==TKGameInputProfile::MissilesDefense && _paddleJoystick.enabled())
+     _paddleJoystick.setAbsoluteOverride(true,_missilesAim.positionForAxis(0),
+                                          _missilesAim.positionForAxis(1));
+ }
+ void syncTapeInputProfile(){
+   const TKGameInputProfile profile=TKJoystickProfile(tape.gameInputProfile());
+   // Raw identity: the keyboard applies TKJoystickProfile itself and also
+   // needs it for the Montezuma-only A/Z rule.
+   keyboard.setGameInputProfile(tape.gameInputProfile());
+   _paddleJoystick.setMode(TKPaddleModeForProfile(profile));
+   _paddleJoystick.setAbsoluteOverride(false);
+   _missilesAim.reset(cpu.cycles);
  }
  void setJoystickEnabled(bool enabled){
    keyboard.clearJoystick();
    keyboard.setGameInputProfile(tape.gameInputProfile());
    _paddleJoystick.setEnabled(enabled);
+   _paddleJoystick.setMode(TKPaddleModeForProfile(TKJoystickProfile(tape.gameInputProfile())));
    // Center the passive PDL inputs on BOTH transitions.  OFF means no
    // physical joystick input, not an unplugged/fully-left PDL capacitor.
    _paddleJoystick.trigger(cpu.cycles);
@@ -54,12 +70,18 @@ public:
  }
  bool joystickEnabled() const {return _paddleJoystick.enabled();}
  void serviceSpeaker();
+ void monitorTapeInput(uint8_t level);
+ void monitorTapeOutput(uint64_t previousEdgeCycle);
+
  // FabGL SoundGenerator mixes guest C030 speaker and realistic drive PCM into
  // the single GPIO25 DAC output; no second sound chip or speaker pin is used.
  void serviceAudio(uint32_t nowMs, bool paused=false);
  // LED states mirror PCM activity envelopes; independent of DRIVE SOUND ON/OFF.
  uint8_t driveLED(int drive, uint32_t nowMs) const;
  void setDriveSoundEnabled(bool enabled);
+ void setTapeSoundEnabled(bool enabled);
+ bool tapeSoundEnabled() const {return _tapeSoundEnabled;}
+
  bool driveSoundEnabled() const {return _driveSoundEnabled;}
  uint16_t speakerFrequency() const {return _speakerHz;}
  // Takes ownership of a fully validated 16 KiB buffer (allocated with malloc/ps_malloc).
@@ -106,6 +128,7 @@ private:
  TKPaddleJoystick _paddleJoystick;
  TKMissilesAim _missilesAim;
  bool _driveSoundEnabled=false;
+ bool _tapeSoundEnabled=true; // power-on ON, independent of drive audio
  TKDriveActivity _driveActivity;
  uint16_t _pwmHz=0;
  uint8_t _pwmDuty=0;

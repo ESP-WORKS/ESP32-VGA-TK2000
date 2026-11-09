@@ -12,8 +12,8 @@ public:
   bool ctrlDown = false;   // physical Ctrl key
   void key(uint8_t code, bool down);
   void setShift(bool down);
-  // PC CTRL+A..Z generates BASIC token shortcuts on the TK matrix by
-  // supplying the original SHIFT+CTRL+letter combination.
+  // The physical CONTROL contact is independent of SHIFT. The original TK
+  // CTRL+letter functions are preserved; BASIC tokens need CTRL+SHIFT+letter.
   void setPhysicalCtrl(bool down);
   // Physical TK-2000 FIRE button: dedicated TAB input, independent of joystick ON/OFF.
   void setFire(bool down) { physicalFire = down; }
@@ -26,18 +26,25 @@ public:
   // Opening F1/F2 must not electrically reset the running TK keyboard hardware.
   void releaseInputs();
   // Joystick directions use the TK-2000 keyboard matrix, like MiSTer RTL.
-  // Codes: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=BUTTON (SPACE).
+  // Codes: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, 4=FIRE1, 5=FIRE2.
   void setJoystick(uint8_t action, bool down);
   void clearJoystick();
   void setJoystickMask(uint8_t mask);
   void setGameInputProfile(TKGameInputProfile profile) {
-    if (gameInputProfile!=profile) {
-      if (gameInputProfile==TKGameInputProfile::MissilesDefense) key(' ',false);
-      gameInputProfile=profile;
-      if (gameInputProfile==TKGameInputProfile::MissilesDefense && (joyMask&0x10u))
-        key(' ',true);
-    }
+    // The v0.89 default maps every CT2 identity to Standard.  With the
+    // PlatformIO compatibility flag = 1, retain the exact v0.88 profile.
+    // Profiles affect the KBIN OR only. Never inject a synthetic physical
+    // SPACE key; mixing owners of one contact causes release-order bugs.
+    gameInputProfile=TKJoystickProfile(profile);
+    montezumaAZ=(profile==TKGameInputProfile::Montezuma);
   }
+  TKGameInputProfile inputProfile() const { return gameInputProfile; }
+  // v0.96: the ONLY title-specific input rule, requested by the user. While
+  // the user-verified Montezuma CT2 (size+CRC, TKDetectTapeGameInput) is the
+  // mounted tape, cursor UP/DOWN (keyboard or joystick) also close the A/Z
+  // contacts that the game uses for ladders. Every other title is untouched.
+  void setMontezumaVerticalAZ(bool on) { montezumaAZ = on; }
+  bool montezumaVerticalAZ() const { return montezumaAZ; }
   uint8_t joystickMask() const { return joyMask; }
   uint8_t in() const;
 
@@ -59,6 +66,7 @@ private:
   uint8_t repeatActive = 0;
   uint32_t repeatStartMs = 0;
   uint8_t joyMask = 0;
+  bool montezumaAZ = false;
   TKGameInputProfile gameInputProfile = TKGameInputProfile::Standard;
 
   void updateShiftBit();

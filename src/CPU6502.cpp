@@ -1,4 +1,5 @@
 #include "CPU6502.h"
+#include "TKUniversalPREAD.h"
 #include "TKSaturn128K.h"
 #include "Bus.h"
 #include "TKVideoDirty.h"
@@ -178,6 +179,16 @@ int CPU6502::step(){
        rd((uint16_t)(ret-2))==0x20 &&
        rd((uint16_t)(ret-1))==0x2F && rd(ret)==0xFB) PC=0xFB2E;
  }
+#if TK2000_UNIVERSAL_PREAD
+ // JOYSTICK ON = an Apple-compatible analog joystick is attached (FPGA
+ // TK2000 II gameport): every genuine JSR $FB1E (Apple PREAD entry) gets
+ // the axis value, for any program. JOYSTICK OFF = nothing attached: the
+ // untouched TK ROM runs (SEC;RTS) and Y is preserved, as on a real TK.
+ if (universalPreadActive && TKUniversalPREADCall(fastRAM,fastROM,
+       fastROMSelected && *fastROMSelected,PC,X,S))
+   Y=(X==0u)?universalPreadX:universalPreadY;
+#endif
+#if TK2000_GAME_JOYSTICK_COMPAT
  // Moon Patrol contains JSR $FB1E at $0766 but on this TK ROM that is
  // SEC/RTS instead of Apple II PREAD. Confirm the *caller's* literal JSR,
  // stack return, live ROM overlay and ROM stub before changing Y. This
@@ -209,6 +220,7 @@ int CPU6502::step(){
        fastRAM[ret-2u]==0x20u && fastRAM[ret-1u]==0x1Eu && fastRAM[ret]==0xFBu)
      Y=(X==0u)?missilesDefensePreadX:missilesDefensePreadY;
  }
+#endif // TK2000_GAME_JOYSTICK_COMPAT
  pageCrossed=false;
  uint8_t o=fetch(); const Op &q=T[o]; uint16_t a=0; uint8_t v=0,r=0; int c=q.cyc;
  auto readOperand=[&](){ if(q.mode==IMM) return fetch(); a=addr(q.mode); if(pageCrossed) ++c; return rd(a); };

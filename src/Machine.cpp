@@ -2,6 +2,7 @@
 #include "Bus.h"
 #include "Machine.h"
 #include "BuildConfig.h"
+#include "TKGameportDecode.h"
 #include "TKTapeROMFast.h"
 #include <string.h>
 #include <stdlib.h>
@@ -159,7 +160,10 @@ bool TKMachine::resetState(bool cold){
   saturn.resetSwitches();
   keyboard.clear();
   keyboard.setGameInputProfile(tape.gameInputProfile());
-  _paddleJoystick.setMask(0);
+  // Reset the analog contacts as well: STANDARD otherwise retains an old
+  // axis after F12/COLD RESET, unlike the original Windows JoyReset().
+  _paddleJoystick.setEnabled(_paddleJoystick.enabled());
+  _paddleJoystick.setMode(TKPaddleModeForProfile(TKJoystickProfile(tape.gameInputProfile())));
   _missilesAim.reset(cpu.cycles);
   cpu.irq_pending=false;
   cpu.nmi_pending=false;
@@ -171,6 +175,7 @@ bool TKMachine::resetState(bool cold){
 #if defined(ESP32)
   if (_audioReady) {
     tkPCMChannel.mixer.setSpeakerHz(0);
+    tkPCMChannel.mixer.stopTapeSignal();
     TKDriveSoundState st[2]; readDriveSoundState(st);
     tkPCMChannel.mixer.arm(st);
   }
@@ -237,7 +242,9 @@ uint8_t TKMachine::read(uint16_t a){
       if(tape.mounted() && (tape.mayRestartRead(cpu.cycles) ||
                             (!tape.playing() && !tape.paused() && !tape.finished())))
         tape.beginPlay();
-      return (uint8_t)((matrix & 0x7Fu) | tape.read(cpu.cycles));
+      const uint8_t input=tape.read(cpu.cycles);
+      monitorTapeInput(input);
+      return (uint8_t)((matrix & 0x7Fu) | input);
     }
     return matrix;
   }
@@ -263,7 +270,9 @@ uint8_t TKMachine::read(uint16_t a){
     }
     if(cpu.PC==0xFCE8u && !tape.recording() && !loadaCalibration)
       tape.requestSave();
+    const uint64_t before=tape.lastOutputCycle();
     tape.outputToggle(cpu.cycles);
+    monitorTapeOutput(before);
     return 0xFF;
   }
   if(a>=0xC030 && a<=0xC03F){
@@ -276,18 +285,21 @@ uint8_t TKMachine::read(uint16_t a){
 
   if(a>=0xC090 && a<=0xC09F) return diskSlotActive ? disk.read(a,cpu.cycles) : 0x7Fu;
   if(a>=0xC0B0 && a<=0xC0BF) { saturn.touch(a); return 0x7Fu; }
-  if(a==0xC070) {
-    // Preserve the TK cassette result, and retrigger the passive PDL timers
-    // even with F1 JOYSTICK OFF.  Apple-II-style games sample C064/C065
-    // after C070: returning open-bus 0x7F unconditionally makes PREAD=0
-    // (hard LEFT).  A disconnected joystick must report the centered value,
-    // not a permanently discharged analog timer.  No input is accepted OFF.
+  // FPGA tk2000.vhd: the full C07x nibble strobes the passive PDL timers.
+  // This is an independent analog circuit, NEVER a cassette transport access.
+  // Even with JOYSTICK OFF, a disconnected axis has a stable neutral timer.
+  if (TKGameportDecode::isPaddleStrobe(a)) {
     _paddleJoystick.trigger(cpu.cycles);
     return 0x7Fu;
   }
-  if(a>=0xC061 && a<=0xC067)
-    return _paddleJoystick.read(a,cpu.cycles);
-  if(a==0xC071) return 0x7F;
+  // FPGA routes A(2..0) to GAMEPORT for all C060..C06F reads.
+  // C068..C06F must mirror C060..C067 instead of returning open bus;
+  // no game-dependent key or tape exception is used here.
+  if (TKGameportDecode::isGameport(a)) {
+    const uint16_t port=TKGameportDecode::canonicalGameport(a);
+    if (port==0xC060u) return 0x7Fu; // cassette/serial input not populated
+    return _paddleJoystick.read(port,cpu.cycles);
+  }
 
   if(a>=0xC050 && a<=0xC05F){
     video.writeSwitch(a);
@@ -332,9 +344,9 @@ void TKMachine::write(uint16_t a,uint8_t v){
     return;
   }
   if(a>=0xC0B0 && a<=0xC0BF){ saturn.touch(a); return; }
-  if (a==0xC070) {
-    // Reading/writing the trigger must behave identically in OFF and ON;
-    // the TK cassette input on reads remains untouched.
+  if (TKGameportDecode::isPaddleStrobe(a)) {
+    // Mirrored PDL_STROBE on C070..C07F for both memory access directions.
+    // Never route this decoded circuit to the TK cassette transport.
     _paddleJoystick.trigger(cpu.cycles); return;
   }
   if(a>=0xC020 && a<=0xC02F) {
@@ -355,7 +367,9 @@ void TKMachine::write(uint16_t a,uint8_t v){
     }
     if(cpu.PC==0xFCE8u && !tape.recording() && !loadaCalibration)
       tape.requestSave();
-    tape.outputToggle(cpu.cycles);return;
+    const uint64_t before=tape.lastOutputCycle();
+    tape.outputToggle(cpu.cycles);
+    monitorTapeOutput(before);return;
   }
   if(a>=0xC030 && a<=0xC03F){
     sound^=0x80; speakerLastToggleCycle=cpu.cycles; speakerActive=true;
@@ -389,23 +403,37 @@ void TKMachine::traceSwitch(uint16_t addr) {
 }
 
 void TKMachine::run(uint32_t cycles){
+  // In the default v0.89 comparison build this profile resolves to
+  // Standard: neither game's special PREAD shim is enabled.  When the
+  // PlatformIO flag is 1, the exact v0.88 behavior below is restored.
   // The supplied Moon Patrol CT2 calls Apple's PREAD at $FB1E from its
   // wrapper $0766. TK-2000 ROM $FB1E is only SEC/RTS, so Y never gets
   // updated. Enable a Y-coordinate compatibility shim only for this CT2
   // and with F4 ON. All other titles execute the untouched original ROM.
-  cpu.moonPatrolPreadCompat=(tape.gameInputProfile()==TKGameInputProfile::MoonPatrol &&
+  // These values are global device state, valid for ALL callers of
+  // $FB1E and also while joystick emulation is OFF (neutral center).
+  cpu.universalPreadX=_paddleJoystick.positionForAxis(0);
+  cpu.universalPreadY=_paddleJoystick.positionForAxis(1);
+  cpu.universalPreadActive=_paddleJoystick.enabled();
+  const TKGameInputProfile joystickProfile=TKJoystickProfile(tape.gameInputProfile());
+  cpu.moonPatrolPreadCompat=(joystickProfile==TKGameInputProfile::MoonPatrol &&
                              _paddleJoystick.enabled());
   if (cpu.moonPatrolPreadCompat) {
     cpu.moonPatrolPreadX=_paddleJoystick.positionForAxis(0);
     cpu.moonPatrolPreadY=_paddleJoystick.positionForAxis(1);
   }
-  cpu.missilesDefensePreadCompat=(tape.gameInputProfile()==TKGameInputProfile::MissilesDefense &&
+  cpu.missilesDefensePreadCompat=(joystickProfile==TKGameInputProfile::MissilesDefense &&
                                  _paddleJoystick.enabled());
   if (cpu.missilesDefensePreadCompat) {
     // Persistent absolute analog aim, not full-left/full-right then auto-center.
     _missilesAim.advance(cpu.cycles,keyboard.joystickMask());
     cpu.missilesDefensePreadX=_missilesAim.positionForAxis(0);
     cpu.missilesDefensePreadY=_missilesAim.positionForAxis(1);
+    // PREAD shim and $C064/$C065 must agree on the same absolute aim.
+    _paddleJoystick.setAbsoluteOverride(true,cpu.missilesDefensePreadX,
+                                           cpu.missilesDefensePreadY);
+  } else {
+    _paddleJoystick.setAbsoluteOverride(false);
   }
   // A no-disk power-on stops just as the REAL ROM enters the Disk II slot,
   // AFTER drawing the TK2000 header but BEFORE starting a BASIC prompt.
@@ -501,6 +529,10 @@ void TKMachine::beginAudio() {
   }
 #endif
   _audioReady=true;
+#if defined(ESP32)
+  tkPCMChannel.mixer.setTapeSoundEnabled(_tapeSoundEnabled);
+#endif
+
 }
 
 void TKMachine::readDriveSoundState(TKDriveSoundState (&state)[2]) const {
@@ -521,6 +553,35 @@ void TKMachine::setDriveSoundEnabled(bool enabled) {
     tkPCMChannel.mixer.arm(st);
     tkPCMChannel.mixer.setDriveEnabled(enabled);
   }
+#endif
+}
+
+void TKMachine::monitorTapeInput(uint8_t level) {
+#if defined(ESP32)
+  if(_audioReady && tape.playing() && !tape.paused())
+    tkPCMChannel.mixer.updateTapeSignal(true,level,tape.audioHalfWaveCycles());
+#else
+  (void)level;
+#endif
+}
+void TKMachine::monitorTapeOutput(uint64_t previousEdgeCycle) {
+#if defined(ESP32)
+  if(_audioReady && tape.recording() && previousEdgeCycle &&
+     cpu.cycles>previousEdgeCycle) {
+    const uint64_t delta=cpu.cycles-previousEdgeCycle;
+    // Count is per completed half-wave; parity follows CASOUT transitions.
+    const uint8_t level=(tape.capturedEdges()&1u)?0x80u:0u;
+    tkPCMChannel.mixer.updateTapeSignal(true,level,
+                   (uint32_t)(delta>UINT32_MAX?UINT32_MAX:delta));
+  }
+#else
+  (void)previousEdgeCycle;
+#endif
+}
+void TKMachine::setTapeSoundEnabled(bool enabled) {
+  _tapeSoundEnabled=enabled;
+#if defined(ESP32)
+  if(_audioReady)tkPCMChannel.mixer.setTapeSoundEnabled(enabled);
 #endif
 }
 
@@ -553,6 +614,10 @@ void TKMachine::serviceAudio(uint32_t nowMs, bool paused) {
 #if defined(ESP32)
   if(!_audioReady)return;
   tkPCMChannel.mixer.update(st);
+  // Tape mode changes (pause, rewind, eject, EOF, finished recording) mute
+  // the monitor independently of the original C030 speaker or disk motors.
+  if(!tape.playing() && !tape.recording())tkPCMChannel.mixer.stopTapeSignal();
+  if(tape.paused())tkPCMChannel.mixer.stopTapeSignal();
   tkPCMChannel.mixer.setPaused(paused);
 #else
   (void)paused;

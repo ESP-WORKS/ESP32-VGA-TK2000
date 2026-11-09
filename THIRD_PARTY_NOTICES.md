@@ -12,3 +12,8 @@
 Este projeto distribui seu código-fonte sob GPL-3.0-ou-posterior, conforme
 `LICENSE`. As ROMs, jogos e imagens de disquete não são fornecidos e devem
 ser obtidos legitimamente pelo usuário.
+
+- **TK2000 Java (2008, Gabriel Velo)**: `Tape.java` / `Sound.java` consultados
+  como referência funcional para o monitor de áudio K7 sincronizado às
+  transições do sinal. O projeto v0.97 possui implementação PCM independente;
+  o código-fonte Java e sua ROM não são redistribuídos neste ZIP.

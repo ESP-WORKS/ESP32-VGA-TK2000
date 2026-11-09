@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "TKTapePCM97.h"
 #include "TKDriveActivity.h" // Share read/write envelope lengths with both drive LEDs.
 
 // Integer-only, single-sample PCM synthesis for FabGL SoundGenerator DAC.
@@ -48,7 +49,13 @@ public:
     }
   }
   void setDriveEnabled(bool enabled) { _enabled=enabled?1:0; }
-  void setPaused(bool paused) { _paused=paused?1:0; }
+  void setPaused(bool paused) { _paused=paused?1:0; _tape.setPaused(paused); }
+  void setTapeSoundEnabled(bool on) { _tape.setEnabled(on); }
+  void updateTapeSignal(bool active,uint8_t level,uint32_t halfCycles) {
+    _tape.signal(active,level,halfCycles);
+  }
+  void stopTapeSignal() { _tape.stop(); }
+
   bool driveEnabled() const {return _enabled!=0;}
   // Snapshot of the ACTUAL 16kHz PCM envelopes, including queued head steps.
   uint8_t ledPCM(int drive) const {return drive>=0 && drive<2 ? _ledPCM[drive] : uint8_t(TKDriveActivity::OFF);}
@@ -63,10 +70,12 @@ public:
       _speakerPhase+=speakerStep;
       speakerMix=(_speakerPhase&0x80000000u)?62:-62;
     }
+    const int cassetteMix=_tape.nextSample();
     int driveMix=0;
     if(!_enabled || _paused) {
       _ledPCM[0]=_ledPCM[1]=TKDriveActivity::OFF;
-      return speakerMix;
+      int mixed=speakerMix+cassetteMix;
+      return mixed>127?127:(mixed<-127?-127:mixed);
     }
     _noise ^= _noise << 13;
     _noise ^= _noise >> 17;
@@ -137,12 +146,13 @@ public:
     // during BASIC music or game sound. The no-speaker path is bounded to
     // FabGL's 8-bit DAC range; no global SoundGenerator gain was touched.
     if (!speakerStep) driveMix=(driveMix*5)/4;
-    int mix=speakerMix+driveMix;
+    int mix=speakerMix+driveMix+cassetteMix;
     if(mix>127)mix=127;
     if(mix<-127)mix=-127;
     return mix;
   }
 private:
+  TKTapePCM97 _tape;
   volatile uint32_t _speakerStep=0;
   uint32_t _speakerPhase=0;
   volatile uint8_t _enabled=0,_paused=0;

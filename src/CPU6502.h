@@ -19,6 +19,10 @@ public:
   bool tkdosLegacyBootAlias=false;
   // Exact Moon Patrol CT2 compatibility: Apple PREAD ($FB1E) returns a
   // coordinate in Y for axis X=0/1. Enabled by TKMachine only with F4 ON.
+  uint8_t universalPreadX=128, universalPreadY=128;
+  // v0.96: Apple-style PREAD answer only while a joystick is attached
+  // (F4 ON). With JOYSTICK OFF, JSR $FB1E is the genuine ROM (Y kept).
+  bool universalPreadActive=false;
   bool moonPatrolPreadCompat=false;
   uint8_t moonPatrolPreadX=127, moonPatrolPreadY=127;
   // Exact, isolated Missiles Defense CT2 PREAD shim. $41C3 is a real JSR

@@ -13,7 +13,9 @@
 #include "FramePacer.h"
 #include "JoystickKeys.h"
 #include "JoystickInput.h"
+#include "TKHostKeyOwners.h"
 #include "TKCPUPacing.h"
+#include "TKInputEventPacing.h"
 #include "TKCassetteTurbo.h"
 #include "TKMoonTurboPolicy.h"
 #include "TKTapeJournal.h"
@@ -35,13 +37,13 @@ static TKFramePacer framePacer;
 static uint32_t lastCpuMicros=0;
 static uint16_t cpuCycleRemainder=0;
 static uint32_t cpuCycleBudget=0;
+static uint32_t queuedInputCycleDebt=0; // guest cycles used between queued PS/2 transitions
 static uint8_t lastCassetteRate=1;
 // Diagnostics: report measured guest throughput during cassette activity.
 // No periodic work outside K7; helps distinguish host CPU saturation from
 // the ~8x target without drawing extra OSD elements over the game.
 static uint32_t lastK7ReportMs=0;
 static uint64_t lastK7ReportCycles=0;
-static uint16_t measuredMoonTurboHundredths=0;
 static uint32_t moonVideoFrameSequence=0;
 #if TK2000_K7_MOON_PROFILE
 struct TK2000MoonK7Profile {
@@ -99,8 +101,10 @@ static bool keyboardBR=true; // BR/ABNT2 is the default; US remains selectable i
 static bool diskLEDsEnabled=true; // Display D1/D2 activity LEDs by default; does not alter drive I/O.
 static constexpr bool artifactsColorEnabled=true; // HGR artifact colors always enabled (validated v0.35 palette).
 static bool driveSoundEnabled=true; // Validated FabGL PCM Disk II sound; ON by default.
+static bool tapeSoundEnabled=true; // v0.97: K7 monitor sound ON at power-up.
 static uint32_t lastJoystickPollMs=0;
 static TKJoystickInput joystickKeys;
+static TKHostKeyOwners hostKeyOwners;
 static bool mainMenuOpen=false;
 static int mainMenuSelected=0;
 static bool mainMenuEnterLatched=false; // One toggle per physical Enter press.
@@ -218,18 +222,18 @@ static void updateDiskMenuNavigation(int previousSelection,int previousScroll){
 }
 static void closeDiskMenu(){
   diskMenuOpen=false;
-  machine.keyboard.releaseInputs(); // release keys whose PS/2 KEYUP was consumed by F2
+  machine.keyboard.releaseInputs(); hostKeyOwners.clear(); // release keys whose PS/2 KEYUP was consumed by F2
   clearHostModifiers();
   joystickKeys.clear(); machine.clearJoystick();
   vga.dismissDiskMenu();
   diskBrowser.clear(); // release every reserved PSRAM byte until next F2
-  lastCpuMicros=micros();cpuCycleBudget=0;cpuCycleRemainder=0;
+  lastCpuMicros=micros();cpuCycleBudget=0;cpuCycleRemainder=0;queuedInputCycleDebt=0;
   fpsMeterActive=false; // Pause/menu time must not reduce measured EPS.
   framePacer.reset();
 }
 static void openDiskMenu(){
   if(!emulatorReady)return;
-  machine.keyboard.releaseInputs(); // do not leave cursor/SPACE held in guest
+  machine.keyboard.releaseInputs(); hostKeyOwners.clear(); // do not leave cursor/SPACE held in guest
   clearHostModifiers();
   joystickKeys.clear(); machine.clearJoystick();
   refreshDiskList();diskMenuOpen=true;diskMenuDrive=0;
@@ -296,6 +300,9 @@ static bool selectTapeFile(const char* path){
     free(image);return false;
   }
   snprintf(tapePath,sizeof(tapePath),"%s",path);
+  // The selected game's exact-CRC profile must reach the actual TK matrix;
+  // CPU-only PREAD recognition was insufficient. Keep it across F1/F4.
+  machine.syncTapeInputProfile();
   return true;
 }
 static bool createBlankTape(const char* path){
@@ -341,16 +348,16 @@ static void closeTapeMenu(){
   if(!tapeMenuOpen)return;
   tapeMenuOpen=false;tapeMenuCreating=false;tapeOverwriteConfirm=false;
   tapeSavePending=false;tapeNeedLoad=false;
-  machine.keyboard.releaseInputs();clearHostModifiers();
+  machine.keyboard.releaseInputs(); hostKeyOwners.clear();clearHostModifiers();
   joystickKeys.clear();machine.clearJoystick();
   if(vgaReady)vga.dismissDiskMenu();
   tapeBrowser.clear();
-  lastCpuMicros=micros();cpuCycleBudget=0;cpuCycleRemainder=0;
+  lastCpuMicros=micros();cpuCycleBudget=0;cpuCycleRemainder=0;queuedInputCycleDebt=0;
   fpsMeterActive=false;framePacer.reset();
 }
 static void openTapeMenu(bool needsLoad=false,bool saving=false){
   if(!emulatorReady || diskMenuOpen)return;
-  machine.keyboard.releaseInputs();clearHostModifiers();
+  machine.keyboard.releaseInputs(); hostKeyOwners.clear();clearHostModifiers();
   joystickKeys.clear();machine.clearJoystick();
   tapeMenuCreating=false;tapeOverwriteConfirm=false;
   tapeSavePending=saving;tapeNeedLoad=needsLoad;
@@ -588,6 +595,7 @@ static void tapeMenuKey(fabgl::VirtualKey vk){
   }
   if(vk==fabgl::VK_e || vk==fabgl::VK_E){
     machine.tape.eject();tapePath[0]=0;
+    machine.syncTapeInputProfile();
     snprintf(tapeMessage,sizeof(tapeMessage),"FITA EJETADA");
   }
   if((vk==fabgl::VK_RETURN || vk==fabgl::VK_KP_ENTER)&&tapeBrowser.count()>0){
@@ -631,27 +639,27 @@ static void serviceTapeRequest(){
 static void resetEmulatedTK2000(const char* shortcut, bool cold=false);
 // Compact F1 overlay: the virtual CPU pauses just as it does in the F2 browser.
 // Never allocate a disk list while browsing this menu.
-static const int kMainMenuRows=9;
+static const int kMainMenuRows=10;
 static void drawMainMenu(){
   if(!mainMenuOpen || !vgaReady)return;
-  vga.showMainMenu(mainMenuSelected,showFPS,joystickEnabled,keyboardBR,diskLEDsEnabled,driveSoundEnabled);
+  vga.showMainMenu(mainMenuSelected,showFPS,joystickEnabled,keyboardBR,diskLEDsEnabled,driveSoundEnabled,tapeSoundEnabled);
 }
 static void closeMainMenu(){
   if(!mainMenuOpen)return;
   mainMenuOpen=false;
   mainMenuEnterLatched=false;
-  machine.keyboard.releaseInputs();
+  machine.keyboard.releaseInputs(); hostKeyOwners.clear();
   clearHostModifiers();
   machine.clearJoystick();
   joystickKeys.clear();
   if(vgaReady)vga.dismissMainMenu();
-  lastCpuMicros=micros();cpuCycleBudget=0;cpuCycleRemainder=0;
+  lastCpuMicros=micros();cpuCycleBudget=0;cpuCycleRemainder=0;queuedInputCycleDebt=0;
   fpsMeterActive=false;
   framePacer.reset();
 }
 static void openMainMenu(){
   if(!emulatorReady || !vgaReady || diskMenuOpen || tapeMenuOpen)return;
-  machine.keyboard.releaseInputs();clearHostModifiers();machine.clearJoystick();
+  machine.keyboard.releaseInputs(); hostKeyOwners.clear();clearHostModifiers();machine.clearJoystick();
   joystickKeys.clear();
   vga.page=machine.video.page; vga.color=machine.video.color && artifactsColorEnabled;
   vga.render(showFPS,fpsValue,epsValue);
@@ -667,11 +675,11 @@ static void toggleFPS(){
 static void toggleJoystick(){
   joystickEnabled=!joystickEnabled;
   // Avoid held keys and joystick direction getting stuck after mode changes.
-  machine.keyboard.releaseInputs();clearHostModifiers();machine.clearJoystick();
+  machine.keyboard.releaseInputs(); hostKeyOwners.clear();clearHostModifiers();machine.clearJoystick();
   joystickKeys.clear();
   machine.setJoystickEnabled(joystickEnabled);
   // The guest CPU/RAM/KBOUT are untouched; newly enabled input is live.
-  Serial.printf("JOYSTICK (CURSORES+ESPACO): %s\n",joystickEnabled?"ON":"OFF");
+  Serial.printf("JOYSTICK (CURSORES, ESPACO/KP0=FIRE1, KP.=FIRE2): %s\n",joystickEnabled?"ON":"OFF");
 }
 static void toggleJoystickF4(){
   toggleJoystick(); // Same path as F1: clears stale input and switches live.
@@ -684,7 +692,7 @@ static void toggleKeyboardLayout(){
   // Clear the guest matrix and the joystick BEFORE changing the PS/2 VK
   // conversion table. A held key interpreted using the old layout must not
   // stay pressed forever after the switch.
-  machine.keyboard.releaseInputs();
+  machine.keyboard.releaseInputs(); hostKeyOwners.clear();
   clearHostModifiers();
   machine.clearJoystick();
   joystickKeys.clear();
@@ -704,6 +712,11 @@ static void toggleDriveSound(){
   machine.serviceAudio(millis(),true); // OFF silences a running effect immediately.
   Serial.printf("DRIVE SOUND: %s\n",driveSoundEnabled?"ON":"OFF");
 }
+static void toggleTapeSound(){
+  tapeSoundEnabled=!tapeSoundEnabled;
+  machine.setTapeSoundEnabled(tapeSoundEnabled); // instant mute/enable, no transport reset
+  Serial.printf("K7 SOUND: %s\n",tapeSoundEnabled?"ON":"OFF");
+}
 static void mainMenuKey(fabgl::VirtualKey vk){
   if(vk==fabgl::VK_ESCAPE || vk==fabgl::VK_F1){closeMainMenu();return;}
   const int previousSelection=mainMenuSelected;
@@ -719,15 +732,16 @@ static void mainMenuKey(fabgl::VirtualKey vk){
       case 4:toggleKeyboardLayout();break;
       case 5:toggleDiskLEDs();break;
       case 6:toggleDriveSound();break;
-      case 7:closeMainMenu();resetEmulatedTK2000("MENU COLD RESET",true);return;
-      case 8:closeMainMenu();resetESP32();return;
+      case 7:toggleTapeSound();break;
+      case 8:closeMainMenu();resetEmulatedTK2000("MENU COLD RESET",true);return;
+      case 9:closeMainMenu();resetESP32();return;
       default:return;
     }
   }
   if(vk==fabgl::VK_UP || vk==fabgl::VK_DOWN){
     if(mainMenuSelected!=previousSelection)
       vga.updateMainMenuSelection(previousSelection,mainMenuSelected,showFPS,
-                                  joystickEnabled,keyboardBR,diskLEDsEnabled,driveSoundEnabled);
+                                  joystickEnabled,keyboardBR,diskLEDsEnabled,driveSoundEnabled,tapeSoundEnabled);
   } else if(vk==fabgl::VK_RETURN || vk==fabgl::VK_KP_ENTER) drawMainMenu();
 }
 
@@ -768,7 +782,7 @@ static bool startEmulatorFromSD() {
   // With D1 inserted, the original ROM boots its Disk II automatically.
   startupError="";
   lastCpuMicros=micros();
-  cpuCycleRemainder=0; cpuCycleBudget=0;
+  cpuCycleRemainder=0; cpuCycleBudget=0;queuedInputCycleDebt=0;
   lastAutoSavePollMs=lastAudioPollMs=millis();
   diskStatus();
   return true;
@@ -798,10 +812,10 @@ static void resetEmulatedTK2000(const char* shortcut, bool cold){
   }
   if (diskMenuOpen) closeDiskMenu();
   if (tapeMenuOpen) closeTapeMenu();
-  joystickKeys.clear(); machine.clearJoystick();
+  joystickKeys.clear(); hostKeyOwners.clear();clearHostModifiers();machine.clearJoystick();
   if (cold && vgaReady) vga.invalidate();
   fpsMeterActive=false; fpsValue=0; epsValue=0;
-  lastCpuMicros=micros();cpuCycleBudget=0;cpuCycleRemainder=0;
+  lastCpuMicros=micros();cpuCycleBudget=0;cpuCycleRemainder=0;queuedInputCycleDebt=0;
   framePacer.reset();
   lastAutoSavePollMs=lastAudioPollMs=millis();
 }
@@ -852,6 +866,11 @@ static uint8_t translate(fabgl::VirtualKey vk){
     // Neither Ç nor Shift+Ç may inject an ordinary C.
     case fabgl::VK_CEDILLA_c:
     case fabgl::VK_CEDILLA_C: return 0;
+    case fabgl::VK_KP_PERIOD: return ','; // Windows 0.3: decimal keypad types TK comma
+    case fabgl::VK_KP_PLUS: return '+';
+    case fabgl::VK_KP_MINUS: return '-';
+    case fabgl::VK_KP_MULTIPLY: return '*';
+    case fabgl::VK_KP_DIVIDE: return '/';
     case fabgl::VK_LEFTPAREN: return '(';
     case fabgl::VK_RIGHTPAREN: return ')';
     default: return 0;
@@ -917,6 +936,7 @@ void setup(){
      machine.beginAudio();
      // The ON default must reach the PCM mixer, not just the F1 label.
      machine.setDriveSoundEnabled(driveSoundEnabled);
+     machine.setTapeSoundEnabled(tapeSoundEnabled);
      emulatorReady=startEmulatorFromSD();
    } else startupError="FALHA AO ALOCAR VGA 640x200";
  }
@@ -930,7 +950,93 @@ void setup(){
  lastCpuMicros=micros();
  if (!emulatorReady) Serial.println("Boot blocked: F12 tenta reler ROM; reinicio ESP32 disponivel no F1 quando pronto.");
 }
+// FabGL may change the virtual key spelling on an already held physical key
+// as SHIFT changes (letter case and pairs of punctuation symbols). Treat both
+// spellings as the same physical contact when reconciling missing KEYUPs.
+static bool hostVKStillDown(fabgl::VirtualKey vk) {
+  if (!kbd) return false;
+  if (kbd->isVKDown(vk)) return true;
+  // Check both FabGL spellings of the very same physical keypad scan
+  // code. NumLock may be toggled while a direction is still held.
+  switch (vk) {
+    case fabgl::VK_KP_7: return kbd->isVKDown(fabgl::VK_KP_HOME);
+    case fabgl::VK_KP_8: return kbd->isVKDown(fabgl::VK_KP_UP);
+    case fabgl::VK_KP_9: return kbd->isVKDown(fabgl::VK_KP_PAGEUP);
+    case fabgl::VK_KP_4: return kbd->isVKDown(fabgl::VK_KP_LEFT);
+    case fabgl::VK_KP_6: return kbd->isVKDown(fabgl::VK_KP_RIGHT);
+    case fabgl::VK_KP_1: return kbd->isVKDown(fabgl::VK_KP_END);
+    case fabgl::VK_KP_2: return kbd->isVKDown(fabgl::VK_KP_DOWN);
+    case fabgl::VK_KP_3: return kbd->isVKDown(fabgl::VK_KP_PAGEDOWN);
+    case fabgl::VK_KP_0: return kbd->isVKDown(fabgl::VK_KP_INSERT);
+    case fabgl::VK_KP_PERIOD: return kbd->isVKDown(fabgl::VK_KP_DELETE);
+    default: break;
+  }
+  if (vk>=fabgl::VK_a && vk<=fabgl::VK_z)
+    return kbd->isVKDown((fabgl::VirtualKey)(fabgl::VK_A+(vk-fabgl::VK_a)));
+  if (vk>=fabgl::VK_A && vk<=fabgl::VK_Z)
+    return kbd->isVKDown((fabgl::VirtualKey)(fabgl::VK_a+(vk-fabgl::VK_A)));
+  switch (vk) {
+    // US shifted numeric-row VK spellings. Protect held keys when SHIFT
+    // changes, including CTRL+letter shortcuts and multi-key BASIC input.
+    case fabgl::VK_1: return kbd->isVKDown(fabgl::VK_EXCLAIM);
+    case fabgl::VK_EXCLAIM: return kbd->isVKDown(fabgl::VK_1);
+    case fabgl::VK_2: return kbd->isVKDown(fabgl::VK_AT);
+    case fabgl::VK_AT: return kbd->isVKDown(fabgl::VK_2);
+    case fabgl::VK_3: return kbd->isVKDown(fabgl::VK_HASH);
+    case fabgl::VK_HASH: return kbd->isVKDown(fabgl::VK_3);
+    case fabgl::VK_4: return kbd->isVKDown(fabgl::VK_DOLLAR);
+    case fabgl::VK_DOLLAR: return kbd->isVKDown(fabgl::VK_4);
+    case fabgl::VK_5: return kbd->isVKDown(fabgl::VK_PERCENT);
+    case fabgl::VK_PERCENT: return kbd->isVKDown(fabgl::VK_5);
+    case fabgl::VK_6: return kbd->isVKDown(fabgl::VK_CARET);
+    case fabgl::VK_CARET: return kbd->isVKDown(fabgl::VK_6);
+    case fabgl::VK_7: return kbd->isVKDown(fabgl::VK_AMPERSAND);
+    case fabgl::VK_AMPERSAND: return kbd->isVKDown(fabgl::VK_7);
+    case fabgl::VK_8: return kbd->isVKDown(fabgl::VK_ASTERISK);
+    case fabgl::VK_ASTERISK: return kbd->isVKDown(fabgl::VK_8);
+    case fabgl::VK_9: return kbd->isVKDown(fabgl::VK_LEFTPAREN);
+    case fabgl::VK_LEFTPAREN: return kbd->isVKDown(fabgl::VK_9);
+    case fabgl::VK_0: return kbd->isVKDown(fabgl::VK_RIGHTPAREN);
+    case fabgl::VK_RIGHTPAREN: return kbd->isVKDown(fabgl::VK_0);
+    case fabgl::VK_EQUALS: return kbd->isVKDown(fabgl::VK_PLUS);
+    case fabgl::VK_PLUS: return kbd->isVKDown(fabgl::VK_EQUALS);
+    case fabgl::VK_SLASH: return kbd->isVKDown(fabgl::VK_QUESTION);
+    case fabgl::VK_QUESTION: return kbd->isVKDown(fabgl::VK_SLASH);
+    case fabgl::VK_PERIOD: return kbd->isVKDown(fabgl::VK_GREATER);
+    case fabgl::VK_GREATER: return kbd->isVKDown(fabgl::VK_PERIOD);
+    case fabgl::VK_COMMA: return kbd->isVKDown(fabgl::VK_LESS);
+    case fabgl::VK_LESS: return kbd->isVKDown(fabgl::VK_COMMA);
+    case fabgl::VK_COLON: return kbd->isVKDown(fabgl::VK_SEMICOLON);
+    case fabgl::VK_SEMICOLON: return kbd->isVKDown(fabgl::VK_COLON);
+    case fabgl::VK_QUOTE: return kbd->isVKDown(fabgl::VK_QUOTEDBL);
+    case fabgl::VK_QUOTEDBL: return kbd->isVKDown(fabgl::VK_QUOTE);
+    default: return false;
+  }
+}
+// Interleave only when FabGL already has another input transition queued.
+// A short CTRL+B or FIRE press and release must be observable by the 6502.
+// Remaining scheduled cycles are repaid in TKInputEventPacing::payBack().
+static void interleaveQueuedInput(bool keyDown,uint32_t &advancedThisLoop) {
+#if TK2000_INPUT_INTERLEAVE
+  const uint32_t slice=TKInputEventPacing::slice(
+      keyDown, kbd && kbd->virtualKeyAvailable()>0,
+      emulatorReady && !mainMenuOpen && !diskMenuOpen && !tapeMenuOpen &&
+          !machine.waitingForBootReset(),
+      machine.tape.playing() || machine.tape.recording(),advancedThisLoop);
+  if (!slice) return;
+  const uint64_t before=machine.cpu.cycles;
+  machine.run(slice);
+  const uint32_t performed=(uint32_t)(machine.cpu.cycles-before);
+  advancedThisLoop+=performed;
+  // This debt is amortized by the same wall-clock budget as the main loop.
+  if (UINT32_MAX-queuedInputCycleDebt<performed)queuedInputCycleDebt=UINT32_MAX;
+  else queuedInputCycleDebt+=performed;
+#else
+  (void)keyDown;(void)advancedThisLoop;
+#endif
+}
 void loop(){
+ uint32_t advancedInputCyclesThisLoop=0;
  while(kbd && kbd->virtualKeyAvailable()>0){
    bool keyDown=false;
 #if TK2000_PS2_CTRL_TRACE
@@ -943,11 +1049,13 @@ void loop(){
    const bool ctrlVK=(vk==fabgl::VK_LCTRL || vk==fabgl::VK_RCTRL);
    const bool letterVK=((vk>=fabgl::VK_a && vk<=fabgl::VK_z) ||
                         (vk>=fabgl::VK_A && vk<=fabgl::VK_Z));
-   if(ctrlVK || (modifierSides.ctrl() && letterVK)){
-     Serial.printf("[PS2 CTRL] vk=%d %s scan=%02X/%02X/%02X hostCTRL=%d fabCTRL=%d SHIFT=%d\n",
+   const bool shiftVK=(vk==fabgl::VK_LSHIFT || vk==fabgl::VK_RSHIFT);
+   // Diagnostic build only: log every CTRL, SHIFT and letter event.
+   if(ctrlVK || shiftVK || letterVK){
+     Serial.printf("[PS2] t=%lu vk=%d %s scan=%02X/%02X/%02X hostCTRL=%d hostSHIFT=%d fabCTRL=%d fabSHIFT=%d\n",(unsigned long)millis(),
                    (int)vk,keyDown?"DOWN":"UP",
                    ps2item.scancode[0],ps2item.scancode[1],ps2item.scancode[2],
-                   (int)modifierSides.ctrl(),(int)ps2item.CTRL,(int)ps2item.SHIFT);
+                   (int)modifierSides.ctrl(),(int)modifierSides.shift(),(int)ps2item.CTRL,(int)ps2item.SHIFT);
    }
 #else
    fabgl::VirtualKey vk=kbd->getNextVirtualKey(&keyDown, 0);
@@ -960,6 +1068,7 @@ void loop(){
    if(vk==fabgl::VK_F8){
      if (emulatorReady && !diskMenuOpen && !mainMenuOpen && !tapeMenuOpen)
        machine.keyboard.setRepeat(keyDown);
+     interleaveQueuedInput(keyDown,advancedInputCyclesThisLoop);
      continue;
    }
 
@@ -1038,35 +1147,47 @@ void loop(){
    if(vk==fabgl::VK_LSHIFT || vk==fabgl::VK_RSHIFT){
      modifierSides.setShift(vk==fabgl::VK_RSHIFT,keyDown);
      machine.setShift(modifierSides.shift());
+     interleaveQueuedInput(keyDown,advancedInputCyclesThisLoop);
      continue;
    }
    if(vk==fabgl::VK_LCTRL || vk==fabgl::VK_RCTRL){
      modifierSides.setCtrl(vk==fabgl::VK_RCTRL,keyDown);
      machine.setCtrl(modifierSides.ctrl());
+     interleaveQueuedInput(keyDown,advancedInputCyclesThisLoop);
      continue;
    }
    // TAB = physical FIRE on the original scanned TK matrix, regardless of
    // virtual joystick mode. The space bar remains joystick FIRE only when ON.
    if(vk==fabgl::VK_TAB){
      if(emulatorReady)machine.keyboard.setFire(keyDown);
+     interleaveQueuedInput(keyDown,advancedInputCyclesThisLoop);
      continue;
    }
 
-   // With joystick ON, these physical keys are reserved for the joystick.
-   // Do not simultaneously type cursors or spaces into the emulated BASIC.
-   const int joyAction = TKJoystickAction(vk);
-   if(emulatorReady && joystickEnabled && joyAction>=0){
+   // Direction keys and keypad fire controls are reserved for joystick ON.
+   // Physical SPACE is a deliberate exception: it owns the real keyboard
+   // SPACE contact as well as joystick FIRE1, with independent release.
+   if(emulatorReady && joystickEnabled && TKJoystickConsumesKey(vk)){
      // Process the event immediately; periodic physical-state reconciliation
      // below repairs lost releases and numeric-keypad VK transitions.
      joystickKeys.event(vk,keyDown);
      machine.setJoystickMask(joystickKeys.mask());
+     // Physical SPACE owns the TK SPACE contact as well as joystick FIRE1,
+     // released together. Games with their own scanners (Choplifter,
+     // H.E.R.O.) see FIRE '.'; programs testing SPACE still see SPACE.
+     // Direction keys close ONLY their joystick contact (no A/Z bridge):
+     // the ROM scanner $F043 returns the first closed contact by row, so a
+     // bridged 'A' (row 1) used to hide UP (row 6) in Moon Patrol.
+     if(vk==fabgl::VK_SPACE)
+       hostKeyOwners.event(vk,keyDown,' ',
+         [&](uint8_t code,bool down){machine.key(code,down);});
+     interleaveQueuedInput(keyDown,advancedInputCyclesThisLoop);
      continue;
    }
    uint8_t c=translate(vk);
-   if(c && emulatorReady) machine.key(c,keyDown);
-
-   if(keyDown){
-   }
+   if(emulatorReady) hostKeyOwners.event(vk,keyDown,c,
+       [&](uint8_t guestCode,bool down){machine.key(guestCode,down);});
+   if(c) interleaveQueuedInput(keyDown,advancedInputCyclesThisLoop);
  }
  if (diskMenuOpen || tapeMenuOpen || mainMenuOpen) {
    // A paused menu must not postpone a pending automatic disk commit.
@@ -1084,18 +1205,30 @@ void loop(){
  if(machine.tape.recordFinished(machine.cpu.cycles)) {
    if(!saveRecordedTape())Serial.println("[K7] SAVE FAILED; previous CT2 not modified");
  }
- // FabGL keeps the current physical key state independently of its VK queue.
- // Reconcile periodically: a dropped PS/2 key-up must not leave the game
- // driving LEFT forever. Polling at ~12 ms avoids per-instruction overhead.
- if (joystickEnabled && kbd) {
-   const uint32_t joyNow=millis();
-   if ((uint32_t)(joyNow-lastJoystickPollMs)>=12u) {
-     lastJoystickPollMs=joyNow;
-     // Never turn ON a joystick direction just because FabGL reports a VK
-     // as pressed: stale VK aliases used to inject phantom LEFT forever.
-     joystickKeys.releaseMissing(
-       [&](fabgl::VirtualKey vk) { return kbd->isVKDown(vk); });
-     machine.setJoystickMask(joystickKeys.mask());
+ // Poll only to RELEASE missing PS/2 key-ups. Never generate new
+ // presses from isVKDown(), which can report an obsolete shifted alias.
+ // This covers guest letters/punctuation, each modifier side, TAB/FIRE,
+ // F8/REPEAT, and joystick axes/buttons with the same ~12 ms cadence.
+ if (kbd) {
+   const uint32_t inputNow=millis();
+   if ((uint32_t)(inputNow-lastJoystickPollMs)>=12u) {
+     lastJoystickPollMs=inputNow;
+     if(joystickEnabled) {
+       joystickKeys.releaseMissing(
+         [&](fabgl::VirtualKey vk) { return hostVKStillDown(vk); });
+       machine.setJoystickMask(joystickKeys.mask());
+     }
+     hostKeyOwners.releaseMissing(
+       [&](fabgl::VirtualKey vk) {return hostVKStillDown(vk);},
+       [&](uint8_t code,bool down){machine.key(code,down);});
+     modifierSides.releaseMissing(kbd->isVKDown(fabgl::VK_LSHIFT),
+                                  kbd->isVKDown(fabgl::VK_RSHIFT),
+                                  kbd->isVKDown(fabgl::VK_LCTRL),
+                                  kbd->isVKDown(fabgl::VK_RCTRL));
+     machine.setShift(modifierSides.shift());
+     machine.setCtrl(modifierSides.ctrl());
+     if (!kbd->isVKDown(fabgl::VK_TAB)) machine.keyboard.setFire(false);
+     if (!kbd->isVKDown(fabgl::VK_F8)) machine.keyboard.setRepeat(false);
    }
  }
  // Check auto-save once every 20ms, rather than every tight CPU slice.
@@ -1158,8 +1291,6 @@ void loop(){
      const uint32_t elapsed=nowMs-lastK7ReportMs;
      const uint64_t ticks=machine.cpu.cycles-lastK7ReportCycles;
      const uint32_t hundredths=(uint32_t)((ticks*100u)/(uint64_t)(elapsed*1023u));
-     if(machine.tape.gameInputProfile()==TKGameInputProfile::MoonPatrol)
-       measuredMoonTurboHundredths=(uint16_t)(hundredths>999u?999u:hundredths);
 #if TK2000_K7_SERIAL_TRACE
      Serial.printf("[K7 TURBO] real=%lu.%02lux target=8x progress=%u%% pending=%lu cycles\n",
                    (unsigned long)(hundredths/100u), (unsigned long)(hundredths%100u),
@@ -1190,15 +1321,18 @@ void loop(){
 #endif
      lastK7ReportMs=nowMs;lastK7ReportCycles=machine.cpu.cycles;
    }
- }else{lastK7ReportMs=0;lastK7ReportCycles=0;measuredMoonTurboHundredths=0;}
+ }else{lastK7ReportMs=0;lastK7ReportCycles=0;}
  cpuCycleBudget=TKCassetteTurbo::afterTransportStops(cpuCycleBudget,
                                                      lastCassetteRate,cassetteRate);
  lastCassetteRate=cassetteRate;
  const uint32_t earnedCycles=TKCassetteTurbo::cyclesFromUs(
      elapsedUs,cassetteRate,cpuCycleRemainder);
- // Keep the proven v0.7 non-cassette scheduling 100% unchanged; only K7
- // turbo needs a capped pending queue, since the ESP32 may not sustain 8x.
- if(cassetteRate==1u)cpuCycleBudget+=earnedCycles;
+ // Do not advance the 6502 twice for guest cycles already executed while
+ // draining a FabGL MAKE/BREAK burst. Any remaining debt persists across loops.
+ // Tape pacing is otherwise untouched and still uses the bounded K7 queue.
+ if(cassetteRate==1u)
+   cpuCycleBudget=TKInputEventPacing::payBack(cpuCycleBudget,earnedCycles,
+                                               queuedInputCycleDebt);
  else {
 #if TK2000_K7_MOON_PROFILE
    if(machine.tape.gameInputProfile()==TKGameInputProfile::MoonPatrol){
@@ -1210,6 +1344,9 @@ void loop(){
    }
 #endif
    cpuCycleBudget=TKCassetteTurbo::addBounded(cpuCycleBudget,earnedCycles);
+   // An input burst may have occurred immediately before K7 transport began.
+   cpuCycleBudget=TKInputEventPacing::payBack(cpuCycleBudget,0,
+                                               queuedInputCycleDebt);
  }
  // Batch at least 512 cycles so the instruction-level core does not overshoot
  // its wall-clock budget on every tiny loop iteration.
@@ -1322,8 +1459,6 @@ void loop(){
    if (joystickStatusVisible && (int32_t)(millis()-joystickStatusUntilMs)>=0)
      joystickStatusVisible=false;
    vga.drawJoystickStatus(joystickStatusVisible,joystickEnabled);
-   vga.drawK7TurboRate(machine.tape.gameInputProfile()==TKGameInputProfile::MoonPatrol &&
-                       cassetteRate>1u,measuredMoonTurboHundredths);
    vga.show();
 #if TK2000_K7_MOON_PROFILE
    if(moonOnVga)moonK7Profile.vgaUs+=micros()-beforeMoonVga;

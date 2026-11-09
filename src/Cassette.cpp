@@ -217,6 +217,7 @@ uint8_t CassetteCT2::read(uint64_t cycles) {
     level_^=0x80;
     const uint16_t d=nextDuration();
     if(!d){playing_=false;finished_=true;autoPaused_=manualPaused_=false;break;}
+    edgeDuration_=d; // current half-wave is also the audible tape frequency
     nextEdgeCycle_+=d;
   }
   return level_;

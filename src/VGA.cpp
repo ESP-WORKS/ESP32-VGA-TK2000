@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <string.h>
 #include "VGA.h"
+#include "TKMainMenu97.h"
 #include "HGRColor.h"
 #include "HGRFast.h"
+#include "TKVGARawSpan.h"
 static const uint8_t font5x7[][5]={
 {0,0,0,0,0},{0,0,95,0,0},{0,7,0,7,0},{20,127,20,127,20},{36,42,127,42,18},{35,19,8,100,98},{54,73,85,34,80},{0,5,3,0,0},{0,28,34,65,0},{0,65,34,28,0},{20,8,62,8,20},{8,8,62,8,8},{0,80,48,0,0},{8,8,8,8,8},{0,96,96,0,0},{32,16,8,4,2},
 {62,81,73,69,62},{0,66,127,64,0},{66,97,81,73,70},{33,65,69,75,49},{24,20,18,127,16},{39,69,69,69,57},{60,74,73,73,48},{1,113,9,5,3},{54,73,73,73,54},{6,73,73,41,30},
@@ -58,9 +60,13 @@ void TKVGA::rect(int x,int y,int w,int h,uint8_t c){
   const uint8_t raw = rawColors[c];
   const int xEnd = x + w;
   const int yEnd = y + h;
+  // The former per-pixel loop performed up to 128,000 writes into the
+  // scanout framebuffer when clearing 640x200. This could overlap DMA
+  // line fetches for many milliseconds, appearing as VHS/CRT-like snow.
+  // Work with the FabGL 32-bit-swizzled row and fill the whole aligned
+  // span using short contiguous stores; border pixels remain identical.
   for (int py=y; py<yEnd; ++py)
-    for (int px=x; px<xEnd; ++px)
-      ctrl.setRawPixel(px, py, raw);
+    TKVGAFillPackedSpan(ctrl.getScanline(py), x, xEnd, raw);
 }
 
 // TK-2000 / MPF-II has no native text-character generator. The monitor's
@@ -110,7 +116,7 @@ void TKVGA::hiresRow(int y, const uint8_t source[40]) {
   }
 #if defined(ESP32) && TK2000_VGA_DIRECT_SCANLINE
   // 40 is 32-bit aligned, so the packed RGB/sync byte order remains intact.
-  memcpy(scanline+40,packedRow,sizeof(packedRow));
+  TKVGACopyPackedRow(scanline+40,packedRow,sizeof(packedRow));
 #endif
 }
 
@@ -157,7 +163,6 @@ void TKVGA::render(bool showFPS, uint16_t fps, uint16_t eps){
     cacheValid=false;
     ledStates[0]=ledStates[1]=255;
     joystickStatus=255;
-    lastK7Rate=0xFFFFu;lastK7Visible=false;
   }
   // Fast row-dirty rendering: hires() compares 40 logical bytes per line.
   // It redraws only changed lines, while page/color changes force a full redraw.
@@ -221,22 +226,6 @@ void TKVGA::drawJoystickStatus(bool visible, bool enabled) {
   joystickStatus=status;
 }
 
-void TKVGA::drawK7TurboRate(bool visible,uint16_t hundredths){
-  if(!ram)return;
-  if(lastK7Visible==visible && (!visible || lastK7Rate==hundredths))return;
-  // Right-hand overscan: never write into the 560-pixel game display.
-  rect(601,123,39,31,0);
-  if(visible){
-    drawText5x7(611,125,"K7",6);
-    char value[8];
-    // 39 pixels allow 5 glyphs: e.g. 8.0X (the actual measured speed).
-    snprintf(value,sizeof(value),"%u.%uX",(unsigned)(hundredths/100u),
-             (unsigned)((hundredths%100u)/10u));
-    drawText5x7(607,139,value,3);
-  }
-  lastK7Visible=visible;lastK7Rate=hundredths;
-}
-
 void TKVGA::drawText5x7(int x, int y, const char *text, uint8_t fg) {
   for (int n=0; text && text[n] && x+5<=639; ++n, x+=6) {
     const unsigned char c=(unsigned char)text[n];
@@ -298,56 +287,51 @@ void TKVGA::showStartupError(const char *reason){
   needsFullClear=true;
 }
 
-// Compact F1 overlay. Only the central 390x170 area is painted, retaining
-// the emulated bitmap and both disk LEDs in the surrounding margins.
-void TKVGA::showMainMenu(int selected, bool showFPS, bool joystickEnabled, bool keyboardBR, bool diskLEDsEnabled, bool driveSoundEnabled){
-  const int x=125, y=15, w=390, h=170;
-  rect(x,y,w,h,4);              // blue outline
-  rect(x+2,y+2,w-4,h-4,0);      // opaque black only inside the dialog
+// F1 is slightly taller in v0.97 so all ten options stay above the footer.
+// Selection repaint still touches ONLY the two relevant rows (no flicker).
+namespace {
+static const char * const kMainMenuOptions97[TKMainMenu97::rows]={
+  "SELECIONAR DISCO (F2)","SELECIONAR FITA (F3)","EXIBIR FPS",
+  "EMULAÇÃO JOYSTICK (F4)","LAYOUT TECLADO","LED DISCOS",
+  "SOM DOS DRIVES","SOM FITAS K7","COLD RESET","REINICIAR ESP32"
+};
+static const char* menuSetting97(int i,bool fps,bool joy,bool br,bool leds,bool drive,bool tape) {
+  switch(i) {
+    case 2:return fps?"ON":"OFF";
+    case 3:return joy?"ON":"OFF";
+    case 4:return br?"BR":"US";
+    case 5:return leds?"ON":"OFF";
+    case 6:return drive?"ON":"OFF";
+    case 7:return tape?"ON":"OFF";
+    default:return nullptr;
+  }
+}
+}
+void TKVGA::showMainMenu(int selected,bool showFPS,bool joystickEnabled,bool keyboardBR,bool diskLEDsEnabled,bool driveSoundEnabled,bool tapeSoundEnabled) {
+  const int x=TKMainMenu97::x,y=TKMainMenu97::y,w=TKMainMenu97::width,h=TKMainMenu97::height;
+  rect(x,y,w,h,4);
+  rect(x+2,y+2,w-4,h-4,0);
   rect(x+5,y+5,w-10,16,4);
   drawText5x7(x+13,y+10,"TK-2000 - MENU PRINCIPAL (F1)",7);
-  const char *options[]={
-    "SELECIONAR DISCO (F2)",
-    "SELECIONAR FITA (F3)",
-    "EXIBIR FPS",
-    "EMULAÇÃO JOYSTICK (F4)",
-    "LAYOUT TECLADO",
-    "LED DISCOS",
-    "SOM DOS DRIVES",
-    "COLD RESET",
-    "REINICIAR ESP32"
-  };
-  for(int i=0;i<9;++i){
-    const int rowY=y+25+i*13;
+  for(int i=0;i<TKMainMenu97::rows;++i) {
+    const int rowY=TKMainMenu97::rowY(i);
     if(i==selected)rect(x+8,rowY-2,w-16,12,4);
-    drawText5x7(x+17,rowY,options[i],7);
-    if(i==2)drawText5x7(x+310,rowY,showFPS?"ON":"OFF",i==selected?7:3);
-    if(i==3)drawText5x7(x+310,rowY,joystickEnabled?"ON":"OFF",i==selected?7:3);
-    if(i==4)drawText5x7(x+310,rowY,keyboardBR?"BR":"US",i==selected?7:3);
-    if(i==5)drawText5x7(x+310,rowY,diskLEDsEnabled?"ON":"OFF",i==selected?7:3);
-    if(i==6)drawText5x7(x+310,rowY,driveSoundEnabled?"ON":"OFF",i==selected?7:3);
+    drawText5x7(x+17,rowY,kMainMenuOptions97[i],7);
+    const char* setting=menuSetting97(i,showFPS,joystickEnabled,keyboardBR,diskLEDsEnabled,driveSoundEnabled,tapeSoundEnabled);
+    if(setting)drawText5x7(x+310,rowY,setting,i==selected?7:3);
   }
-  rect(x+8,y+147,w-16,1,7);
-  drawText5x7(x+18,y+154,"SETAS: ESCOLHER  ENTER: EXECUTAR  ESC: SAIR",7);
+  rect(x+8,y+TKMainMenu97::separatorOffset,w-16,1,7);
+  drawText5x7(x+18,y+TKMainMenu97::footerOffset,"SETAS: ESCOLHER  ENTER: EXECUTAR  ESC: SAIR",7);
 }
 
-// Update at most two F1 rows, never clear the 390x170 dialog underneath.
-void TKVGA::updateMainMenuSelection(int oldSelected,int selected,bool showFPS,bool joystickEnabled,bool keyboardBR,bool diskLEDsEnabled,bool driveSoundEnabled) {
-  const char* options[]={"SELECIONAR DISCO (F2)","SELECIONAR FITA (F3)","EXIBIR FPS",
-                         "EMULAÇÃO JOYSTICK (F4)","LAYOUT TECLADO","LED DISCOS",
-                         "SOM DOS DRIVES","COLD RESET","REINICIAR ESP32"};
+void TKVGA::updateMainMenuSelection(int oldSelected,int selected,bool showFPS,bool joystickEnabled,bool keyboardBR,bool diskLEDsEnabled,bool driveSoundEnabled,bool tapeSoundEnabled) {
   for(int pass=0;pass<2;++pass){
     const int i=pass?selected:oldSelected;
-    if(i<0||i>=9||(pass && selected==oldSelected))continue;
-    const int x=125,y=15,w=390,rowY=y+25+i*13;
+    if(i<0 || i>=TKMainMenu97::rows || (pass && selected==oldSelected))continue;
+    const int x=TKMainMenu97::x,w=TKMainMenu97::width,rowY=TKMainMenu97::rowY(i);
     rect(x+8,rowY-2,w-16,12,i==selected?4:0);
-    drawText5x7(x+17,rowY,options[i],7);
-    const char *setting=nullptr;
-    if(i==2)setting=showFPS?"ON":"OFF";
-    if(i==3)setting=joystickEnabled?"ON":"OFF";
-    if(i==4)setting=keyboardBR?"BR":"US";
-    if(i==5)setting=diskLEDsEnabled?"ON":"OFF";
-    if(i==6)setting=driveSoundEnabled?"ON":"OFF";
+    drawText5x7(x+17,rowY,kMainMenuOptions97[i],7);
+    const char* setting=menuSetting97(i,showFPS,joystickEnabled,keyboardBR,diskLEDsEnabled,driveSoundEnabled,tapeSoundEnabled);
     if(setting)drawText5x7(x+310,rowY,setting,i==selected?7:3);
   }
 }

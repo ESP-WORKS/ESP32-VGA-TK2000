@@ -1,4 +1,5 @@
 #include "Keyboard.h"
+#include "TKJoystickMatrix.h"
 #include <string.h>
 
 bool KeyboardTK::mapKey(uint8_t c, uint8_t &r, uint8_t &col, bool &forceShift) {
@@ -63,19 +64,16 @@ bool KeyboardTK::mapKey(uint8_t c, uint8_t &r, uint8_t &col, bool &forceShift) {
 }
 
 void KeyboardTK::updateShiftBit() {
-  // TK-2000 BASIC keyword shortcuts use SHIFT+CTRL+letter ($F043 emits
-  // bit 7 together with bit 6). PC users expect CTRL+letter alone to
-  // produce the token. Keep the original physical SHIFT and CTRL inputs
-  // independent, and add SHIFT only while at least one A..Z is physically
-  // held together with CTRL. No ASCII/token byte is injected by the host.
-  bool tokenShift = false;
-  if (ctrlDown) {
-    for (uint8_t c = 'A'; c <= 'Z'; ++c) {
-      if (held[c]) { tokenShift = true; break; }
-    }
-  }
-  if ((physicalShift || forcedShiftCount || tokenShift) && !suppressedShiftCount) rows[0] |= 0x01;
-  else rows[0] &= (uint8_t)~0x01;
+  // Match the physical TK-2000 keyboard and the Windows 0.3 reference:
+  // CONTROL and SHIFT are INDEPENDENT contacts. CTRL+letter must not
+  // synthesize SHIFT: the TK ROM uses combinations such as CTRL+C/X/G/R/S/Q
+  // for control functions. BASIC keyword tokens require a REAL simultaneous
+  // CTRL+SHIFT+letter press. Other glyphs with a fixed TK shifted mapping
+  // (such as + or @) still use forcedShiftCount as before.
+  if ((physicalShift || forcedShiftCount) && !suppressedShiftCount)
+    rows[0] |= 0x01;
+  else
+    rows[0] &= (uint8_t)~0x01;
 }
 
 void KeyboardTK::setShift(bool down) {
@@ -85,7 +83,8 @@ void KeyboardTK::setShift(bool down) {
 
 void KeyboardTK::setPhysicalCtrl(bool down) {
   ctrlDown = down;
-  updateShiftBit(); // also release synthetic SHIFT when CTRL is released first
+  // The CTRL contact must not modify the original SHIFT row.
+  updateShiftBit();
 }
 
 void KeyboardTK::key(uint8_t code, bool down) {
@@ -169,35 +168,36 @@ void KeyboardTK::serviceRepeat(uint32_t nowMs) {
 }
 
 void KeyboardTK::setJoystick(uint8_t action, bool down) {
-  if (action > 4) return;
+  if (action > 5) return;
   const uint8_t bit=(uint8_t)(1u << action);
   setJoystickMask(down?(uint8_t)(joyMask|bit):(uint8_t)(joyMask&~bit));
 }
 void KeyboardTK::clearJoystick() {
   joyMask=0;
-  if (gameInputProfile==TKGameInputProfile::MissilesDefense) key(' ',false);
 }
 void KeyboardTK::setJoystickMask(uint8_t mask) {
-  const uint8_t next=(uint8_t)(mask & 0x1Fu);
-  if (gameInputProfile==TKGameInputProfile::MissilesDefense &&
-      ((next^joyMask)&0x10u))
-    key(' ',(next&0x10u)!=0u);
-  joyMask=next;
+  // Fire sources are composed at KBIN read time. Never synthesize a
+  // keyboard.key(' ') press: a physical SPACE key-up would otherwise
+  // release a still-held joystick button, or vice versa.
+  joyMask=(uint8_t)(mask & 0x3Fu);
 }
 
 uint8_t KeyboardTK::in() const {
-  uint8_t value=0x80;
-  // CTRL is a separate matrix drive line selected by $C05E/$C05F.
-  // It must be ORed with scanned letter contacts, not returned instead of
-  // them: otherwise CTRL+A..Z appears as a lone CONTROL key (BASIC beep).
+  // KBIN = {cassette input, printer BUSY, six matrix columns} (MiSTer
+  // rtl/tk2000.v: kbd_data_s = {cas_i, lpt_busy_i, kbd_cols_i}). With no
+  // tape signal and no printer both upper lines read 0. v0.96: idle bit 7 is
+  // 0, not 1. TK software tests "key present" with LDA $C010 / CMP #$80
+  // (e.g. the TK Choplifter keyboard driver), so a constant bit 7 looked
+  // like a permanently pressed key/button. The cassette path ORs the real
+  // tape level into bit 7 separately (TKMachine::read), and the TK ROM
+  // reader is polarity independent (EOR $2F).
+  uint8_t value=0x00;
+  // MAME tk2000.cpp kbin_r(): the $C05F CONTROL latch selects an
+  // ADDITIONAL input row, independent of KBOUT.  The former v0.91 Windows
+  // shortcut returned 0x81 immediately, discarding all selected lines.
+  // This difference is observable to arbitrary guest keyboard scanners and
+  // programs; use the actual matrix OR, not a synthetic ASCII code.
   if (ctrl && ctrlDown) value |= 0x01u;
-  // Opposite directions on the same axis cancel to the neutral center,
-  // matching the original emulator's keyboard joystick (average x/y = 127).
-  // Do not turn both inputs ON: a game which gives LEFT precedence would then
-  // move by itself while two keys are held.
-  uint8_t activeJoy=joyMask;
-  if ((activeJoy & 0x03u)==0x03u) activeJoy &= (uint8_t)~0x03u;
-  if ((activeJoy & 0x0Cu)==0x0Cu) activeJoy &= (uint8_t)~0x0Cu;
   for (uint8_t row=0; row<8; ++row) {
     if (!(out & (1u << row))) continue;
     uint8_t physicalRows=rows[row];
@@ -206,34 +206,41 @@ uint8_t KeyboardTK::in() const {
         keyRefs[row][heldCol[repeatActive]]==1)
       physicalRows &= (uint8_t)~(1u << heldCol[repeatActive]);
     value |= physicalRows;
-    // Joystick shares keyboard rows/columns, not analog Apple II paddle IO.
-    // MiSTer joystick mapping: rows 6/5/4/3, column 0 for directions;
-    // The reference JoyVerificaTecla() reports BUTTON1 at row 7, column 4.
-    // SPACE is only the physical PC key used to trigger that virtual button.
-    if ((row == 6 && (activeJoy & 0x01)) ||
-        (row == 5 && (activeJoy & 0x02)) ||
-        (row == 3 && (activeJoy & 0x04)) ||
-        (row == 4 && (activeJoy & 0x08))) value |= 0x01;
-    if (row == 7 && physicalFire) value |= 0x10; // TAB: original FIRE even if joystick is OFF
-    if (row == 7 && (activeJoy & 0x10)) value |= 0x10;
-    // This particular Montezuma CT2 translates A/Z into the VERTICAL axis
-    // (see game code $7658); the ordinary physical TK joystick directions
-    // alone cannot drive that axis. Add A/Z only for this exact tape and
-    // only when virtual joystick is enabled. UP=A, DOWN=Z.
-    // Missiles Defense's original program reads the TK keyboard matrix for
-    // the trigger, even though it calls Apple PREAD for the aim coordinates.
-    // Virtual SPACE must also appear at the TK SPACE matrix contact while
-    // JOYSTICK ON; this is isolated by the exact tape CRC fingerprint.
+    // MAME confirms the joystick is wired to KBIN/KBOUT.  Windows 0.3
+    // provides the tested row/column contacts and normalized thresholds.
+    value |= TKJoystickMatrix::rowBits(joyMask,row,physicalFire);
+#if TK2000_JOYSTICK_KEYBOARD_BRIDGE
+    // Generic multi-interface keyboard bridge. Some 6502 programs poll
+    // KBOUT directions, others use the native A/Z vertical keys or SPACE.
+    // Expose the same host joystick state to all three existing contacts,
+    // without any title/CRC/RAM-specific condition or key ownership hack.
+    // The joystick is already cleared whenever JOYSTICK is OFF.
+    if (row == 1 && (joyMask & 0x01u) && !(joyMask & 0x02u)) value |= 0x20u; // A/up
+    if (row == 0 && (joyMask & 0x02u) && !(joyMask & 0x01u)) value |= 0x20u; // Z/down
+    if (row == 2 && (joyMask & 0x10u)) value |= 0x01u; // SPACE/FIRE1
+#endif
+#if TK2000_MONTEZUMA_AZ
+    if (montezumaAZ) {
+      const bool up=((joyMask & 0x01u) && !(joyMask & 0x02u)) || (rows[6] & 0x01u);
+      const bool down=((joyMask & 0x02u) && !(joyMask & 0x01u)) || (rows[5] & 0x01u);
+      if (row == 1 && up && !down) value |= 0x20u;   // A
+      if (row == 0 && down && !up) value |= 0x20u;   // Z
+    }
+#endif
+#if TK2000_GAME_JOYSTICK_COMPAT
+    // Legacy v0.88 per-tape matrix extensions, available only in the
+    // explicitly opted-in historical A/B build (never in standard v0.94).
     if (gameInputProfile == TKGameInputProfile::MissilesDefense &&
-        row == 2 && (activeJoy & 0x10u)) value |= 0x01u;
+        row == 2 && (joyMask & 0x10u)) value |= 0x01u;
     if (gameInputProfile == TKGameInputProfile::Montezuma) {
-      if (row == 1 && (activeJoy & 0x01u)) value |= 0x20u; // A
-      if (row == 0 && (activeJoy & 0x02u)) value |= 0x20u; // Z
+      if (row == 1 && (joyMask & 0x01u)) value |= 0x20u; // A
+      if (row == 0 && (joyMask & 0x02u)) value |= 0x20u; // Z
       // The supplied game checks the TK SPACE matrix contact for JUMP
       // even in joystick mode. Keep the ordinary FIRE row as well, so
       // both joystick button and legacy SPACE-based game controls work.
-      if (row == 2 && (activeJoy & 0x10u)) value |= 0x01u; // SPACE
+      if (row == 2 && (joyMask & 0x10u)) value |= 0x01u; // SPACE
     }
+#endif
   }
   return value;
 }
@@ -246,9 +253,14 @@ void KeyboardTK::releaseInputs() {
   // loses joystick input until it reinitializes (often after cold reset).
   const uint8_t selectedRows=out;
   const bool controlLatch=ctrl;
+  const TKGameInputProfile profile=gameInputProfile;
   clear();
   out=selectedRows;
   ctrl=controlLatch;
+  // F1/F2/F3/F4 capture is a HOST-only key release: the CT2 profile
+  // remains active while a game is running. Resetting it to Standard
+  // silently disabled Montezuma/Missiles on every F4 toggle.
+  gameInputProfile=profile;
 }
 
 void KeyboardTK::clear() {

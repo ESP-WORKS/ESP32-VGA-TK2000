@@ -39,6 +39,8 @@ public:
   void beginPlay();
   uint8_t read(uint64_t cycles); // input line: bit 7 for $C010 ROM reader
   bool playing() const { return playing_; }
+  uint16_t audioHalfWaveCycles() const { return edgeDuration_; }
+
   // Next actual half-wave transition in guest cycles; 0 before the first
   // sample or while stopped. Used solely by the ROM busy-wait fast path.
   uint64_t nextEdgeDeadline() const { return playing_ ? nextEdgeCycle_ : 0; }

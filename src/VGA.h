@@ -17,10 +17,10 @@ public:
                    const char *entry, bool creating, bool overwrite, bool saving,
                    const char *transport=nullptr, uint16_t block=0,
                    uint16_t blocks=0, uint8_t progress=0);
- void showMainMenu(int selected,bool showFPS,bool joystickEnabled,bool keyboardBR,bool diskLEDsEnabled,bool driveSoundEnabled);
+ void showMainMenu(int selected,bool showFPS,bool joystickEnabled,bool keyboardBR,bool diskLEDsEnabled,bool driveSoundEnabled,bool tapeSoundEnabled);
  // Direct-framebuffer row changes avoid blacking out the entire menu on
  // each PS/2 typematic arrow event (the source of visible flashing).
- void updateMainMenuSelection(int oldSelected,int selected,bool showFPS,bool joystickEnabled,bool keyboardBR,bool diskLEDsEnabled,bool driveSoundEnabled);
+ void updateMainMenuSelection(int oldSelected,int selected,bool showFPS,bool joystickEnabled,bool keyboardBR,bool diskLEDsEnabled,bool driveSoundEnabled,bool tapeSoundEnabled);
  void updateDiskMenuSelection(int oldSelected,int selected,int scroll,const char* const* names,int rows,int total);
  void updateTapeMenuSelection(int oldSelected,int selected,int scroll,const char* const* names,int rows,int total);
  // Redraw only scrolling rows + scrollbar, keeping headers and footers.
@@ -33,10 +33,8 @@ public:
  void drawDiskLEDs(uint8_t d1, uint8_t d2, bool visible=true);
  // F4 joystick confirmation, using the same small OSD palette as the F1/FPS panels.
  void drawJoystickStatus(bool visible, bool enabled);
- // Effective guest K7 speed without a serial monitor (right border only).
- void drawK7TurboRate(bool visible,uint16_t hundredths);
 
- void invalidate() { cacheValid=false; ledStates[0]=ledStates[1]=255; joystickStatus=255; lastK7Rate=0xFFFFu; lastK7Visible=false; needsFullClear=true; }
+ void invalidate() { cacheValid=false; ledStates[0]=ledStates[1]=255; joystickStatus=255; needsFullClear=true; }
 
 private:
  TKVideoDirty* dirtyTracker=nullptr;
@@ -54,6 +52,4 @@ private:
  uint8_t rawColors[8] = {};
  uint8_t ledStates[2] = {255,255};
  uint8_t joystickStatus=255;
- uint16_t lastK7Rate=0xFFFFu;
- bool lastK7Visible=false;
 };

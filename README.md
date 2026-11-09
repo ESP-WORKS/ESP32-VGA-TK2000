@@ -1,200 +1,120 @@
+# Atualização v0.97 — Som FITAS K7
 
-Desenvolvido por André Chaves
+A partir da **base oficial v0.96r3**, F1 possui dez opções e uma nova escolha
+`SOM FITAS K7  ON/OFF` (inicial ON). Reproduz os pulsos de leitura CT2 e de
+salvamento C020 pelo DAC GPIO25, no mesmo misturador do speaker e drives, mas
+com controle de áudio independente. Em OFF as operações K7 não são alteradas.
+A janela F1 foi ampliada verticalmente para acomodar a opção. Ver
+`CHANGELOG_0.97.md` para implementação, limitações e roteiro de testes.
 
-> **v0.86 cumulativa para testes:** novo controle de mira e disparo em Missiles Defense; redução de atualização do bitmap durante K7 de Moon Patrol para liberar CPU. A velocidade real só será confirmada na TTGO. Consulte `CHANGELOG_0.86.md` e `TESTES_0.86.md`.
+---
 
-# TK-2000 para TTGO VGA32 — v0.86 MÍNIMA CUMULATIVA
+# Versão v0.96 (revisão 3): entrada fiel ao hardware TK2000
 
-Emulador do TK-2000 para ESP32-WROVER/TTGO VGA32 com FabGL 1.0.9,
-CPU MOS 6502, ROM externa pelo SD, Disk II DSK/NIB, Saturn 128K e
-cassete CT2. Esta é uma **distribuição mínima de código-fonte**, no
-mesmo conceito de `MC-1000_0.7_MINIMO.zip`: não inclui ROMs, jogos,
-disquetes, imagens K7, binários compilados, testes host ou versões históricas.
+KBIN em repouso com bit 7 = 0; setas sem ponte A/Z (a ROM lia "A" no lugar de "↑"); ESPAÇO = tecla ESPAÇO + FIRE1 com JOYSTICK ON; PREAD Apple em `JSR $FB1E` somente com JOYSTICK ON; A/Z nas setas apenas para o Montezuma. Consulte `CHANGELOG_0.96.md`.
 
-## Requisitos e compilação
+> **v0.95:** espelhamento C06x de joystick e C07x de strobe de paddle (FPGA TK2000 II). Veja `CHANGELOG_0.95.md`.
 
-- TTGO VGA32 com PSRAM (ESP32-WROVER), teclado PS/2 e cartão SD.
-- Arduino CLI no Windows, core `esp32:esp32` 2.0.17 e biblioteca FabGL 1.0.9.
-- `COMPILAR.bat` no Windows ou `COMPILAR.sh` no Linux/macOS.
-- FQBN: `esp32:esp32:esp32wrover:PartitionScheme=huge_app`.
-- O `partitions.csv` é exigido pelo esquema ESP-WORKS.
-- O script compila **apenas** o `firmware.bin` de OTA0 para o bootloader
-  ESP-WORKS e confere partições, limite de tamanho e checksum. Ele não
-  realiza gravação direta de bootloader/partições/otadata na flash.
-- Saída esperada: `build/bootloader_sd/TK2000/firmware.bin` e
-  `build/bootloader_sd/TK2000/version.txt` (identificação `TK2000_0.86`).
-- Não reutilize binários antigos se a compilação ou verificação falhar.
+> **v0.94 — auditoria geral de teclado e joystick:** corrigida a perda de eventos PS/2 quando MAKE e BREAK chegam na mesma fila (execução intercalada de 6502 com débito de ciclos compensado); adicionada ponte global opcional JOYSTICK ON -> A/Z e FIRE1/ESPAÇO, sem detectar jogos. CONTROL+B é o comando correto para modo gráfico. Veja `CHANGELOG_0.94.md` e `docs/CONTROLES_GERAIS_V094.md`. Moon Patrol aprovado fisicamente na v0.93; a v0.94 ainda exige testes no equipamento.
 
-## Cartão SD
+> **v0.93**: auditoria C17/Java, inicialização genérica do paddle e reforço na reconciliação PS/2. Veja `CHANGELOG_0.93.md`.
 
-Conserve seus arquivos já utilizados pela v0.7; **não reformate o SD**.
-A inicialização precisa de duas ROMs externas compatíveis, cujos bytes não
-estão neste ZIP:
+> **v0.91 — teclado original corrigido:** CONTROL+letra conserva os atalhos do TK-2000 (C/X/G/R/S/Q); somente CONTROL+SHIFT+letra gera tokens BASIC. A matriz e a prioridade do latch CONTROL foram conferidas com o emulador Windows 0.3 e a rotina real da ROM `$F043`. Consulte `CHANGELOG_0.91.md` e `docs/AUDITORIA_CTRL_SHIFT_V091.md`. Testes físicos e compilação PlatformIO ainda pendentes.
 
-```
-/TK-2000/ROMS/TK-2000.ROM   (16 KiB)
-/TK-2000/ROMS/DISK-II.ROM  (256 bytes)
-/TK-2000/DISKS/            (disquetes .DSK/.NIB)
-/TK-2000/CT2/              (fitas .CT2; nomes sem distinguir caixa)
-```
+> **v0.90 — auditoria geral sem patches por jogo:** o joystick padrão recebeu PREAD universal com validação de chamada 6502, soltura robusta de teclas do teclado numérico, SPACE físico na matriz e no FIRE1 e escrita VGA em palavras de 32 bits. Duas variantes analógicas globais (CENTERING e STANDARD) são selecionáveis por opção de compilação, sem identificar os jogos. Consulte `CHANGELOG_0.90.md` e `docs/AUDITORIA_GERAL_CONTROLES_VGA_V090.md`. Compilação PlatformIO e testes físicos pendentes.
 
-O F2 seleciona discos independentes D1/D2; o F3 seleciona uma fita por vez,
-cria novos arquivos e confirma **S/A/N** antes de gravar sobre um nome existente. A recuperação
-`.bak` de uma gravação CT2 interrompida acontece ao abrir F3 se o arquivo
-principal estiver ausente e o backup for estruturalmente válido. Nunca
-promove `.tmp` incompleto. Discos também possuem salvamento transacional.
+> **v0.89 — variante de joystick padrao:** no `platformio.ini`, `TK2000_GAME_JOYSTICK_COMPAT=0` desativa somente atalhos de controle especificos dos jogos. Para recuperar o comportamento v0.88, altere a flag para `1` e recompile. Consulte `CHANGELOG_0.89.md` e `docs/TESTE_JOYSTICK_PADRAO_V089.md`.
 
-## Teclas e comandos
+# TK-2000 ESP32 — base RobGO/TTGO, PlatformIO — v0.91
 
-| Tecla no PC | Ação |
-|---|---|
-| F1 | Menu de opções |
-| F2 | Seletor de disquetes |
-| F3 | Seletor de fita CT2 |
-| F4 | Emulação do joystick ON/OFF, OSD discreto |
-| F8 | REPEAT físico do TK-2000 |
-| TAB | FIRE físico do TK-2000, mesmo com joystick OFF |
-| SHIFT e CONTROL | Ambos os lados, layouts US e BR |
-| F12 | RESET físico equivalente, sem apagar RAM |
+**Base do projeto:** `ESP32-VGA-TK2000-ROBGO-main.zip` fornecido pelo usuário.
+**Referência de comportamento:** `tk2000-emulator-master-0.3.zip` (emulador TK-2000 para Windows, Fábio Belavenuto).
 
-No F3: `P` pausa/continua, `R` rebobina, `N` cria CT2, `E` ejeta,
-`ENTER` seleciona, `ESC` fecha. Quando o nome já existe no diálogo de
-**salvamento**, pressione `S` para substituir, `A` para acrescentar uma
-nova faixa ao final do CT2 (mantendo as anteriores) ou `N`/`ESC` para
-cancelar. O CT2 é validado e atualizado via `.tmp` + `.bak`; gravações
-misturando formatos SAVEA/SAVET ou ultrapassando 8 MiB são recusadas. Para arquivos de fita multietapas,
-reprodução com pausa automática e retomada preserva o pulso pendente;
-K7 Turbo possui alvo de **8×** apenas durante leitura/gravação ativas.
-A velocidade física real depende do processamento disponível na TTGO.
+Este pacote contém o **código-fonte cumulativo** do emulador TK-2000 para ESP32,
+com suporte de teclado PS/2, joystick virtual, vídeo VGA, Disk II, cassete CT2 e
+expansão Saturn 128K. A estrutura `src/main.cpp`, `platformio.ini`, `src/`
+e `partitions.csv` da base RobGO foi preservada. Não inclui ROMs, jogos, arquivos de discos ou binários compilados.
 
-No BASIC, `LOADT` / `LOADA` leem a fita; `SAVET` / `SAVEA` gravam.
-Quando necessário, o seletor F3 é aberto pelo próprio comando. Durante
-carga e gravação de arquivos K7 multietapas, observe o estado PLAY/PAUSA
-AUTO/PAUSA MANUAL no menu F3.
+## Compilação com Visual Studio Code + PlatformIO
 
-A expansão Saturn 128K é instalada automaticamente, com oito bancos 16 KiB,
-registradores no slot 3 `$C0B0–$C0BF`; a ROM BASIC permanece visível ao ligar.
-O menu inicia com indicador de desempenho ligado; o OSD mostra **somente o
-número de EPS** no canto superior direito, sem texto FPS/EPS ou contador FPS.
-Artefatos coloridos HGR permanecem ON. Som PCM dos drives e LEDs D1/D2
-preservam a sincronização já validada.
+1. Extraia todo o ZIP, incluindo `platformio.ini`, `src/` e `partitions.csv`.
+2. Abra a pasta `ESP32-VGA-TK2000-main` no Visual Studio Code com PlatformIO.
+3. Execute **PlatformIO: Build** (ou `pio run -e esp32dev`).
+4. O binário normal do PlatformIO, após uma compilação bem-sucedida, ficará em
+   `.pio/build/esp32dev/firmware.bin`.
 
-## Novidades da v0.86 (cumulativa, pendente de teste físico)
+`platformio.ini` conserva a placa e os parâmetros originais da base RobGO,
+seleciona explicitamente `partitions.csv` e fixa FabGL em `v1.0.9` para
+reprodutibilidade. O arquivo de partições corresponde ao mapa histórico ESP-WORKS
+(factory 0x10000, ota_0 0x130000). **Não use PlatformIO Upload sem antes
+verificar o procedimento do bootloader da sua placa**: compilar não é o mesmo
+que gravar somente a imagem OTA e não se deve substituir o MultiLoader.
 
-1. **Missiles Defense:** direções deslocam a posição analógica persistente da mira em vez de saltar 0/127/255; soltá-las mantém a última posição. ESPAÇO passa pela matriz como uma tecla normal e continua acendendo FIRE virtual. Somente CT2 com CRC exato é afetado.
-2. **Moon Patrol K7:** enquanto a fita exata estiver em PLAY, a CPU atualiza o quadro HGR 15 vezes por segundo em vez de 60, sem desligar o scanout VGA; terminando a carga retorna a 60 Hz. CPU pode trabalhar até 5,5 ms por rodada K7. Indicador `K7` continua visível na tela, sem serial. A taxa física de 8x **não está comprovada**. Referência anterior na v0.85: 1,3x medida pelo usuário.
-3. Preservados menus F1/F2/F3 sem flicker, CONTROL+A-Z, Moon joystick, Montezuma e CT2 multifaixa, todos validados fisicamente em versões anteriores.
+As antigas ferramentas `tools/build_bootloader.py` e `tools/verify_bootloader.py`
+foram conservadas da base recebida, mas não foram adaptadas para compilar
+`src/main.cpp` com PlatformIO; utilize o fluxo `pio run`, não o script Arduino
+legado, para gerar o binário desta versão.
 
-Consulte `CHANGELOG_0.86.md` e `TESTES_0.86.md` para detalhes dos testes em host e pendências na TTGO.
+O ambiente de execução desta auditoria não dispõe da cadeia ESP32/PlatformIO
+nem de acesso à rede para instalá-la. Os testes C++ host foram executados;
+**compilação final RobGO e TTGO e comportamento físico VGA ainda requerem confirmação**.
 
-## Histórico da v0.85
+## Alterações de entrada e VGA — v0.87
 
-1. **Missiles Defense:** reconhecimento restrito ao CT2 enviado; a chamada `JSR $FB1E` recebe a posição atual dos eixos do joystick no registrador Y. Ao soltar as setas, a mira deve parar. O ESPAÇO com JOYSTICK ON aciona FIRE e também a matriz de teclado. Teste na TTGO pendente.
-2. **F1/F2/F3:** as setas atualizam apenas a seleção ou a lista que mudou, em lugar de redesenhar repetidamente todo o diálogo. Verificar visualmente no VGA após compilar.
-3. **Moon Patrol:** indicador `K7` e multiplicador efetivo de ciclos no canto direito do VGA durante PLAY, atualizado a cada aproximadamente dois segundos, **sem monitor serial**. O perfilador serial detalhado fica desligado (`TK2000_K7_MOON_PROFILE=0`) para reduzir trabalho adicional. A meta de 8x **não foi comprovada**; esta edição fornece medição na tela, não uma correção definitiva de velocidade.
-4. **Preservação de funções aprovadas na TTGO:** CONTROL esquerdo/direito + A–Z, joystick ON e cursores de Moon Patrol, joystick de Montezuma e salvamento CT2 com múltiplas faixas.
+- Perfil de jogo detectado pela identidade do CT2 é aplicado à matriz de teclado
+  imediatamente ao montar a fita, e preservado quando um menu libera as teclas
+  ou quando F4 alterna o joystick. Ejetar a fita restaura perfil padrão.
+- O botão virtual SPACE é combinado na leitura da matriz; não é mais
+  artificialmente pressionado como se fosse uma tecla física. Corrige conflitos
+  de ordem de liberação do botão/tecla no Missiles Defense.
+- Joystick via setas e teclado numérico: diagonais (1,3,7,9) com NumLock
+  ligado/desligado e dois botões independentes (SPACE/0; decimal numérico).
+  O botão 2 segue o Windows 0.3 em linha 6, bit 4; também disponível em C062.
+- Teclado numérico fora do joystick reconhece +, -, *, / e vírgula decimal,
+  no mapeamento do emulador de referência.
+- Desenho de retângulos VGA agora grava sequências de pixels já empacotados
+  para a FabGL, eliminando dezenas de milhares de escritas individuais na
+  memória de varredura durante a limpeza/redesenho. O resultado é bit a bit
+  equivalente ao anterior. Isso reduz uma possível causa de "chiado"/snow
+  por atualização parcial, mas não elimina necessariamente interferência
+  elétrica/ruído analógico presente no hardware, que exigirá teste físico.
+- A resolução **640x200**, paleta HGR, menus F1/F2/F3 sem flicker, CTRL+A–Z,
+  cursor Moon Patrol, Montezuma e CT2 multifaixa foram preservados.
+  **Observação histórica:** a função automática CTRL+A..Z -> token descrita
+  na v0.87 foi corrigida na v0.91; tokens exigem CTRL+SHIFT+A..Z.
 
-Os testes locais estão em `TESTES_0.85.md`; sem compilação ESP32/FabGL nem testes físicos desta versão.
+Veja `docs/AUDITORIA_TECLADO_JOYSTICK_VGA_V087.md` para a comparação detalhada
+com a versão Windows 0.3 e `test/host/run.sh` para os testes no computador.
 
-## O que mudou na v0.84 (cumulativa)
+## ROMs e arquivos no cartão SD
 
-1. **CONTROL esquerdo ou direito + A–Z:** a ROM do TK-2000 insere
-   atalhos BASIC via SHIFT+CONTROL+letra. A tradução PS/2 agora mantém
-   os contatos A–Z e fornece SHIFT virtual apenas enquanto CONTROL e
-   uma letra estão pressionados. CONTROL/SHIFT físicos e combinações
-   não alfabéticas continuam independentes. A ROM confirmou 52
-   combinações no teste de computador, **e o usuário confirmou funcionamento na TTGO na v0.84**.
-2. **Moon Patrol, cursores F4 ON:** corrigido o endereço efetivo do
-   `JSR $FB1E` para `$0766` e o retorno 6502 para `$0768`, verificados
-   executando a instrução real do programa em teste host. A v0.83
-   estava errada em `$0765`/`$0767` e sua proteção nunca disparava.
-3. **K7 Turbo de Moon Patrol:** o perfilador `TK2000_K7_MOON_PROFILE=1`
-   acrescenta `[K7 MOON PROFILE]` no serial 115200, junto ao
-   `[K7 TURBO]` já existente, a cada ~5 s de PLAY: tempo CPU/VGA,
-   instruções interpretadas, atalhos ROM, fila saturada/ciclos perdidos,
-   leituras e bordas CT2. **Instrumentação para encontrar o gargalo,
-   não correção comprovada da lentidão nem confirmação física de 8×.**
-   Para comparar desempenho sem o custo do perfilador, compilar com
-   `TK2000_K7_MOON_PROFILE=0` em `src/BuildConfig.h`.
-4. **Preservação:** Montezuma (joystick e pulo), e gravação CT2 com
-   múltiplas faixas permanecem intactos e foram validados pelo usuário
-   em hardware na v0.83.
+A base de código não distribui ROMs e jogos de terceiros. Mantenha os caminhos
+já utilizados na instalação anterior, como `/TK-2000/ROMS/TK-2000.ROM`,
+`/TK-2000/ROMS/DISK-II.ROM`, `/TK-2000/DISKS/` e `/TK-2000/CT2/`.
 
-Consulte `CHANGELOG_0.84.md`, `TESTES_0.84.md`,
-`DIAGNOSTICO_CONTROL_PS2.md` e `DIAGNOSTICO_K7_MOON.md`.
+## Compatibilidade e testes físicos
 
-## O que mudou na v0.83 (histórico da versão anterior)
+A versão v0.91 **não foi testada fisicamente** nesta execução. Recomenda-se:
 
-**Atenção:** as conclusões sobre o endereço `JSR` de Moon Patrol nesta seção
-foram corrigidas na v0.84; consulte `CHANGELOG_0.84.md`.
+- BASIC: CONTROL+C/X/G/R/S/Q sem SHIFT; tokens com CONTROL+SHIFT+A–Z;
+  SHIFT, símbolos BR/US e F8 REPEAT;
+- Joystick ON: setas, diagonais 1/3/7/9, 0/SPACE, decimal numérico; OFF sem entrada residual;
+- Missiles Defense CT2 original fornecido: movimentação, parada e disparo;
+- Montezuma e Moon Patrol: repetir testes de controle já aprovados;
+- Menus F1/F2/F3 sem piscadas, vídeo HGR nas duas páginas, bordas e áudio;
+- RobGO e TTGO: conferir estabilidade de cores/sincronismo VGA e MultiLoader.
+
+O desempenho 8x de Moon Patrol continua sendo uma questão separada; esta
+revisão não promete mudança na velocidade de fita.
+
+## Créditos e histórico
+
+Os avisos de licenças originais permanecem em `LICENSE` e
+`THIRD_PARTY_NOTICES.md`. O README da base anterior foi conservado em
+`docs/README_HISTORICO_V086.md` apenas como documentação histórica, sem alterar
+qual projeto deve ser usado como base atual.
 
 
-1. **CONTROL + A–Z**: o controle elétrico separado ($C05E/$C05F)
-   agora é mesclado aos contatos da matriz, em vez de suprimir a letra
-   pressionada. Funciona tanto com CONTROL esquerdo quanto direito,
-   mantendo o uso simultâneo dos dois modificadores e os layouts BR/US.
-2. **Montezuma**: com F4 joystick ON, a barra ESPAÇO mantém o FIRE
-   na matriz TK original e também aciona o contato ESPAÇO (linha 2, bit 0)
-   utilizado por esta versão do jogo para pular. Só o CT2 exato é afetado.
-3. **Moon Patrol**: na v0.82 a chamada JSR $FB1E foi identificada por um
-   endereço errado ($0766). O código real começa em $0765 e empilha
-   retorno $0767, não $0768. Corrigidos os três bytes da assinatura
-   e o retorno na pilha; os guardas de ROM, F4 ON e identidade CT2 permanecem.
-4. **K7 Turbo Moon Patrol**: o filme CT2 enviado foi comparado byte a byte
-   com a imagem previamente reconhecida; são idênticos (35.547 bytes,
-   CRC-32 C28A4F8D). O total de pulsos do arquivo corresponde a cerca de
-   205 s virtuais, ou limite mínimo teórico de 25,6 s a 8x. O teto de
-   execução para este jogo passa de 4 para 8 lotes de CPU e de 2,5 ms
-   para 3,5 ms por passagem, sem alterar a waveform CT2. Os demais títulos
-   mantêm os limites da v0.82. Um log `[K7 TURBO]` a cada ~5 s de operação
-   indica a velocidade realmente alcançada (xN.NN), percentual e backlog.
-   Isso é uma otimização de throughput, **não uma comprovação de 8x físico**.
+## v0.92 (MAME / controles)
 
-Ver `CHANGELOG_0.83.md` e `TESTES_0.83.md` para detalhes e limites de validação.
-
-## O que mudou na v0.82 (cumulativa)
-
-1. **Slot Disk II durante K7:** montar, criar, rebobinar ou ejetar uma fita
-   pelo F3 **não desliga** a interface de disco. A ROM da interface no
-   `$C100–$C1FF` e os registradores `$C090–$C09F` ficam indisponíveis
-   somente enquanto há operação de cassete; as pausas entre etapas de
-   `LOADT`/`LOADA` contam como parte dela. O **fim real do CT2 (100%)**
-   devolve a interface automaticamente, sem necessidade de ejetar. Ao
-   completar `SAVET`/`SAVEA`, a interface também volta. ROM e imagens
-   de discos permanecem montadas o tempo todo.
-2. **Teclado:** layout **BR/ABNT2** ativado por padrão no boot. A troca
-   BR/US pelo menu F1 continua disponível, inclusive ao vivo.
-3. **F3 gravação:** pergunta de arquivo existente oferece `S` (substituir),
-   `A` (adicionar faixa CT2) e `N`/`ESC` (cancelar). Append preserva todos
-   os registros CA/CB/DA originais, adiciona os novos sem duplicar `CTK2`,
-   faz validação integral e salvamento transacional.
-4. **Karateka/K7 Turbo:** retomadas as otimizações adicionais descritas
-   após v0.81: laços seguros da ROM acelerados também durante leitura,
-   até quatro lotes de CPU consecutivos com limite de tempo e cache do
-   tipo de bloco/byte de dados CT2 em PSRAM. Pulsos CT2 não foram alterados.
-5. **Joystick F4:** preservadas as correções cumulativas de Montezuma
-   (`↑/↓` também como `A/Z`) e Moon Patrol (leitura PREAD em `$FB1E`),
-   ativadas somente pelos CT2 exatos analisados, conforme
-   `CHANGELOG_0.82.md`.
-
-A meta K7 Turbo de **8× permanece dependente de testes de velocidade na
-TTGO VGA32**; resultado em computador não equivale a medição física.
-
-## Funcionalidades anteriores mantidas
-
-- F1/F2/F3/F4/F8/F12; Disk II DSK/NIB; Saturn 128K; áudio PCM dos drives;
-  vídeo HGR em cores; OSD somente valor EPS; TAB/FIRE e repetição.
-- CT2 multietapas, pausa automática e manual e progresso baseado na
-  duração dos pulsos, incluindo tons-guia CA/CB.
-- Interface de disco preservada na memória, com retirada **temporária**
-  durante operações K7 para compatibilidade com Karateka.
-- Recuperação de `.bak` válido e proteção contra `.tmp` incompleto.
-
-Veja os históricos `CHANGELOG_0.81.md` a `CHANGELOG_0.86.md`,
-`TESTES_0.86.md` e `THIRD_PARTY_NOTICES.md`.
-
-**Validação histórica:** comparadas as formas de onda de três CT2 com a v0.81
-(Montezuma, Moon Patrol, Karateka): idênticas; testes C++ de joystick,
-rotinas de atraso da ROM e gravação transacional simulada aprovados. Não
-foi possível compilar para o ESP32/FabGL nem medir 8× na placa neste
-ambiente. ROMs, disquetes e jogos não acompanham esta distribuição mínima.
+Matriz CTRL aditiva conforme o MAME, joystick genérico com limiares do Windows 0.3 e remoção do OSD de velocidade específico Moon Patrol. Veja [CHANGELOG_0.92.md](CHANGELOG_0.92.md) e [auditoria](docs/AUDITORIA_MAME_CONTROLES_V092.md). Recursos especiais por jogo continuam OFF por padrão. Build e teste físico pendentes.
